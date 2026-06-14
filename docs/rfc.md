@@ -1,50 +1,41 @@
-# RFC: Blind TDD/BDD Gate for ralph-universal
+# RFC: Blind TDD/BDD Gate
 
-**Status:** COMPLETE — all tracks + fidelity additions shipped. Foundation + agent layer + Phases A1, A2, A3, E1, E2, B1, B2, C1, C2, C3, D1 + fidelity Additions 1, 2, 3 done. First end-to-end blind-TDD run validated on unity-py-sim. 310/310 tests across 15 suites. (2026-04-10)
+**Status:** Complete and shipped. The full red/green/challenge pipeline, the
+path/bash/audit hooks, the hash-lock, the AC coverage check, both spawners, and
+the impossible-AC probe harness are implemented and tested (272 in-package
+tests).
 **Author:** Dan Schermele + Claude
-**Discussion date:** 2026-04-10
-**Target:** ralph-universal, opt-in per project via config
 
-## Progress log
+> **Provenance & vocabulary.** This RFC was written while the gate lived inside a
+> larger cross-project agent-learning harness — named `ralph-universal` where the
+> text below refers to it directly — and Themis is its standalone extraction. The
+> text therefore refers to that original integration by name. Read these as the
+> *reference integration*, not as requirements:
+>
+> - `smart_gate` — the host's per-commit gate that the blind gate plugged into
+>   (as "step 2c"). Standalone, the equivalent entry point is your own CI step.
+> - `plan.md` / `current_task.json` — the host's task source (acceptance
+>   criteria + public surface per task).
+> - `.ralph/` — the host state directory; in Themis this is `.themis/`.
+>
+> The gate's core — blind writer → hash-lock → blind runner → arbiter — is
+> independent of all of these. The commit-by-commit build history lives in git.
 
-| Date | Commit | What shipped |
-|------|--------|--------------|
-| 2026-04-10 | `bb03739` | **Track 1**: honest smart_gate (expanded source detection, unmapped → full fallback, human check-in on coverage gaps) + `tools/human_input.py` (shared drop box infrastructure) |
-| 2026-04-10 | `9aa1cec` | RFC initial draft |
-| 2026-04-10 | `c52365d` | **OQ1 resolved**: preflight rejection supported via three-layer defense |
-| 2026-04-10 | `e37f7f8` | **Track 3 foundation**: path-guard hook (17/17 tests pass), audit hook, three settings templates, session manager, schema validator (11/11 tests pass) |
-| 2026-04-10 | `21cdd18` | **Track 3 agent layer**: three agent prompt templates, coverage verifier (AST+regex, 5/5 tests pass), orchestrator with ManualSpawner |
-| 2026-04-10 | `24cb382` | **Phase A1**: `ClaudeCodeSpawner` — fresh `claude -p` subprocess per agent, hook + settings install/restore, 9/9 tests pass |
-| 2026-04-10 | `4e7e374` | **Phase A3**: `gate_integration.py` wires orchestrator into `smart_gate.py`; red-state persistence, task resolution via env/current_task.json/plan.md, strict/warn enforcement, 14/14 tests pass |
-| 2026-04-10 | `68b8e5c` | **Phase E1**: adoption guide + `red_pending` phase name |
-| 2026-04-10 | `faddc12` | `ManualSpawner` completion-detection (checks for expected output file before re-staging brief) |
-| 2026-04-10 | `05578d8` | **First end-to-end blind-TDD run** on unity-py-sim: blind writer + runner subagents shipped `Mathf.delta_angle`, red→green with hash integrity held |
-| 2026-04-10 | `9a0b5b6` | **Phase B1**: `tools/blind_tdd/challenge.py` — file_challenge, caps, spawn_arbiter, apply_ruling (upheld/rejected/ambiguous), process_challenge end-to-end, 19/19 tests pass |
-| 2026-04-10 | `f96baef` | **Phase B2**: `BlindTddOrchestrator.resume_red_phase_after_ruling` — re-spawn Agent #1 with arbiter reasoning injected into prompt, merge previous triage, re-hash tree, fresh RedPhaseResult; `resume_green_phase` alias; 11/11 tests pass (44/44 across blind_tdd suites) |
-| 2026-04-10 | `919bc14` | **Phase C1**: `observe.py` classifier + aggregator for blind-TDD records (`is_blind_tdd_record`, `classify_blind_tdd_record`, `extract_blind_tdd_tags`, `aggregate_blind_tdd_stats`); orchestrator emits `blindness_violation_attempt` and `triage_escalation`; human_input emits `human_input_requested`/`_resolved`; 28/28 new tests (72/72 across all blind-TDD suites) |
-| 2026-04-10 | `49bd50f` | **Audit gap closure**: 5 new test files for previously-untested modules — `test_schema_validator.py` (38), `test_session.py` (17), `test_path_guard_hook.py` (22, real subprocess invocation), `test_audit_hook.py` (12, verifies content-leak prevention), `test_hash_integrity.py` (10, real green phase with tamper scenarios). Hash bypass mutation now triggers 3 test failures (was 0). Path guard deny-wins, schema dup detection, upheld deletion, triage merge — all mutation-verified. 171/171 total across all suites. ClaudeCodeSpawner tests' limitations are now documented in its docstring. |
-| 2026-04-10 | `a057e91` | **Phase C2**: dashboard_server.py blind-TDD tiles — `aggregate_blind_tdd_stats` integration into `collect_state`, `_count_pending_human_requests` helper, new HTML section with 11 KPI tiles (red/green tasks, upheld/rejected/ambiguous rulings, cap hits, violations, triage, pending HI) + two bar charts (by type, by outcome). 9/9 tests in `test_dashboard_blind_tdd.py` cover data-contract correctness. Frontend rendering is untested (needs a browser). 180/180 total across all suites. |
-| 2026-04-10 | `09271c6` | **Phase C3**: `tools/lesson_extractor.py` — auto-extracts three lesson patterns from observations: untestable triage categories (≥3 occurrences), ambiguous criterion phrasings (≥2 occurrences), and blindness-violation-prone agent roles (>10% violation rate over ≥10 tool calls). Idempotent: deterministic slugs allow safe re-runs. CLI `python -m tools.lesson_extractor` with `--dry-run`. 27/27 tests pass. 207/207 total. |
-| 2026-04-10 | `7b78076` | **Phase D1**: `CLAUDE.md` mandate update — blind-TDD workflow documented at the top level with adoption checklist, post-task validator narrowed to mutation + audit only when blind gate is enabled (per R11), auto-extracted lessons noted as read-only. 216/216 tests (adding 9 claude_code_spawner). |
-| 2026-04-10 | `c3c95f0` | **Phase A2**: `AgentSdkSpawner` — alternative spawner using `claude_agent_sdk.query()`. Soft imports the SDK so tests run without it installed. Per-role tool scoping (writer no Bash, runner no Write/Edit, arbiter read-only), async→sync shim via asyncio.run(), PreToolUse + PostToolUse hooks injected via SDK's hooks option. 17/17 tests via mock SDK. Mutation-verified: adding Bash to writer list trips test. 233/233 total. |
-| 2026-04-10 | `a9a65ff` | **Fidelity plan**: `docs/blind-tdd-fidelity-plan.md` — 3 additive improvements designed and locked before implementation |
-| 2026-04-10 | `585eb08` | **Fidelity Addition 1**: `preflight.py` — 5 structural checks (subjective language, public-surface coverage, observability, public_api.md, test dirs exist) wired into gate_integration before spawn. Strict default. `preclassified: needs_human` escape hatch. 42/42 tests. Real delta_angle task passes strict preflight. |
-| 2026-04-10 | `c064f41` | **Fidelity Addition 3**: `examples[]` field usage — writer prompt teaches parametrize emission with loose schema; schema_validator warns on multi-case phrasing without examples. Worked example in adoption guide. 5 new schema_validator tests. |
-| 2026-04-10 | (pending) | **Fidelity Addition 2**: `lint_tasks.py` — commit-time advisory linter. Reuses preflight_task + adds criterion gap detection, duplicate task IDs, surface add/modify conflicts, stale completed tasks (historical opt-in). Wired into smart_gate when plan.md is changed. 30/30 tests. 310/310 full suite. |
+## Key design decisions
 
-**Approximate line counts shipped:** ~14,800 across 35 new files.
-
-### Phase A3 design decisions
-
-- **Current task resolution order**: `RALPH_BLIND_TDD_TASK` env > `.ralph/current_task.json` > first `passes:false` task in `plan.md`. If none resolve and the gate is enabled, we pass with `phase="skipped"` so doc-only commits aren't blocked.
-- **Red-state persistence**: `.ralph/blind_tdd/red_state/<task_id>.json` holds `test_file_hashes` + `triage_report` between red and green phases. On green pass the file is cleared; on green fail it stays so the implementing agent can iterate.
-- **Enforcement modes**: `strict` blocks the commit on any red/green/schema failure; `warn` logs the failure to the observation stream but returns `passed=True`.
-- **Smart-gate integration point**: blind-TDD runs as step 2c, after secrets/syntax checks but before tests, so a schema failure doesn't waste pytest time. Recorded as a new `blind_tdd` check on the `ObservationCollector`, surfaced in `gate_data.checks.blind_tdd`.
-- **Import is optional**: smart_gate.py imports `blind_tdd.gate_integration` lazily; projects without the subtree still gate as before.
-
-## What's NOT yet built (picked up in next session)
-
-See the [Remaining work](#remaining-work) section at the end for the concrete next-session plan.
+- **Enforcement modes.** `strict` blocks on any red/green/schema failure; `warn`
+  records the failure but returns `passed=True`.
+- **Gate ordering.** In the reference integration the blind gate runs after
+  secrets/syntax checks but before the test suite, so a schema failure never
+  wastes test time.
+- **Task resolution.** `RALPH_BLIND_TDD_TASK` env → `current_task.json` → first
+  `passes:false` task in `plan.md`. If none resolve, the gate returns
+  `phase="skipped"` so doc-only commits aren't blocked.
+- **Red-state persistence.** Test-file hashes + the triage report are held
+  between the red and green phases under
+  `.themis/blind_tdd/red_state/<task_id>.json`.
+- **Optional import.** The host imports `blind_tdd.gate_integration` lazily, so a
+  project without the subtree gates exactly as before.
 
 ---
 
