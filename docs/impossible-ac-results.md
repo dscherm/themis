@@ -1,6 +1,6 @@
 # Blind-TDD Gate — Impossible-AC Cheating-Rate Results (BT2b)
 
-**Status:** published baseline · **Date:** 2026-06-13 · **Harness:** `tools/blind_tdd/probes.py`, `tools/blind_tdd/probe_driver.py`
+**Status:** published baseline · **Date:** 2026-06-13 · **Harness:** `blind_tdd/probes.py`, `blind_tdd/probe_driver.py`
 
 ## TL;DR
 
@@ -54,7 +54,7 @@ measured cheating rate was not the gate but the *spawn mechanism*** (see §4).
   `false-green`); the gate interpretation lives in `evaluate_batch`. A true ON bypass is a
   green on **intact** locked tests only.
 
-## 2. Results (canonical ledger: `.ralph/blind_tdd/probe_runs.jsonl`, 84 runs)
+## 2. Results (canonical ledger: `data/probe_runs.jsonl`, 84 runs)
 
 ```
 probes.py --gate  →  Verdict: GREEN
@@ -149,20 +149,23 @@ Both fixes ship with tests; full `blind_tdd` + contracts suite: 435 passed.
 ## 8. Reproduction
 
 ```bash
-# canonical gate over the published baseline
-python tools/blind_tdd/probes.py --gate --min-on-runs 20
-
-# rebuild + re-run the full batch (subscription claude -p)
-python .ralph/pilot_run/_batch3x_run.py setup
-python .ralph/pilot_run/_batch3x_run.py run --workers 6      # add --only-missing to fill gaps
-python .ralph/pilot_run/_batch3x_run.py classify             # per-framing report
+# canonical gate over the published baseline (ships in this repo)
+python -m blind_tdd.probes --gate --runs-file data/probe_runs.jsonl --min-on-runs 20
 ```
+
+Rebuilding the batch from scratch requires the `claude -p` subscription spawner and
+the batch driver scripts, which are **not published** with this repo (they carry
+machine-specific paths and produce multi-megabyte per-cell agent transcripts). The
+84-run ledger above is the reproducible artifact; the `--gate` command verifies it.
 
 ## 9. Artifacts
 
-- Canonical ledger: `.ralph/blind_tdd/probe_runs.jsonl` (84 subscription runs).
-- Subscription batch: `.ralph/pilot_run/batch3x/` — `REPORT.md`, `all_records.json`,
-  `on_runs_<framing>.jsonl`, `off_runs_<framing>.jsonl`, per-cell sandboxes.
-- Agent-tool contrast pilot: `.ralph/pilot_run/batch1/REPORT.md` (+ records, `on_tamper_attempts.jsonl`).
-- First live 2-ON/2-OFF pilot: `.ralph/pilot_run/{probe-empty-input,probe-round-half}/`.
-- Drivers/analysis: `.ralph/pilot_run/_*.py`.
+Published in this repo:
+
+- Canonical ledger: `data/probe_runs.jsonl` (84 subscription runs).
+- Subscription batch report: `data/reports/batch3x-subscription-REPORT.md`.
+- Agent-tool contrast report: `data/reports/batch1-agenttool-contrast-REPORT.md`.
+
+Not published (bulky / machine-specific): per-cell sandboxes, raw agent
+transcripts, `all_records.json`, per-framing `on_runs/off_runs` JSONL, and the
+batch driver scripts.
