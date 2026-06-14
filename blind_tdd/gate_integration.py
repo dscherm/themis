@@ -1,0 +1,659 @@
+"""Smart-gate integration for the blind-TDD orchestrator.
+
+This module is the thin adapter between `smart_gate.py` and
+`BlindTddOrchestrator`. It answers three questions:
+
+  1. Should the blind gate engage for this commit?
+     → Yes iff `gate.blind_tdd.enabled` is true AND a current task is
+       identifiable AND that task has `acceptance_criteria` + `public_surface`.
+
+  2. Which phase are we in (red or green)?
+     → Red iff no red-state file exists for the current task yet.
+     → Green iff a red-state file exists (implementation just finished).
+
+  3. What does the caller do with the result?
+     → Red pass: gate passes, saves red state, returns "ready for implementation".
+     → Red fail: gate fails with the schema/spawn/coverage error.
+     → Green pass: gate passes, clears red state, the task is now fully gated.
+     → Green fail: gate fails with hash-mismatch / test-failure / coverage detail.
+
+## Current task identification
+
+Three sources, checked in order:
+
+  a. Env var `RALPH_BLIND_TDD_TASK` — explicit override, used by CLI flags
+     and the ralph loop scripts.
+  b. `.themis/current_task.json` — written by ralph's task-selection logic.
+  c. Fall back to parsing `plan.md` for the first `"passes": false` task.
+
+If none resolve, the blind gate returns `phase="skipped"` with a clear
+reason and does not block the commit. This is the correct behavior for
+commits that aren't tied to a planned task (e.g. pure docs changes).
+
+## Red state persistence
+
+Between red and green phases, the implementing agent writes code. Smart
+gate may be re-invoked several times during that window. We persist the
+red-phase output at `.themis/blind_tdd/red_state/<task_id>.json`:
+
+    {
+      "task_id": "task-42",
+      "timestamp": "2026-04-10T21:00:00Z",
+      "test_file_hashes": { "tests/contracts/foo.py": "abc..." },
+      "triage_report": { ... },
+      "red_session_id": "blind-test_writer-ab12cd34"
+    }
+
+On the next gate run, if this file exists, we skip red and go straight
+to green. The file is deleted on green-pass so the next task can start
+a fresh red phase.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .orchestrator import (
+    BlindTddOrchestrator,
+    GreenPhaseResult,
+    ManualSpawner,
+    RedPhaseResult,
+)
+from .preflight import preflight_task, MODE_OFF
+from .schema_validator import validate_task
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+def get_blind_tdd_config(config: dict) -> dict:
+    """Return the `gate.blind_tdd` sub-config with defaults applied."""
+    raw = (config.get("gate") or {}).get("blind_tdd") or {}
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "enforcement": str(raw.get("enforcement", "strict")),  # "strict" | "warn"
+        "test_dirs": list(raw.get("test_dirs") or ["tests/contracts/", "tests/integration/"]),
+        "public_api_file": str(raw.get("public_api_file", "public_api.md")),
+        "max_challenges_per_task": int(raw.get("max_challenges_per_task", 3)),
+        "max_challenges_per_criterion": int(raw.get("max_challenges_per_criterion", 1)),
+        "human_input_timeout": int(raw.get("human_input_timeout", 3600)),
+        "spawner": str(raw.get("spawner", "claude_code")),  # "claude_code" | "manual"
+        "spawn_auth": str(raw.get("spawn_auth", "subscription")),  # "subscription" | "api"
+        "quality_review": raw.get("quality_review") or {},  # {"enabled": bool}
+        "claude_binary": str(raw.get("claude_binary", "claude")),
+        "ralph_home": raw.get("ralph_home"),  # None → autodetect
+        "spawn_timeout_seconds": int(raw.get("spawn_timeout_seconds", 1800)),
+        "preflight": str(raw.get("preflight", "strict")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Current task resolution
+# ---------------------------------------------------------------------------
+
+def load_current_task(config: dict) -> tuple[dict | None, str]:
+    """Resolve the current task via env var, state file, or plan.md.
+
+    Returns (task_dict, source_description).
+    task_dict is None if no task could be resolved.
+    """
+    # (a) Env var override
+    env_id = os.environ.get("RALPH_BLIND_TDD_TASK", "").strip()
+    if env_id:
+        task = _find_task_in_plan(env_id)
+        if task is not None:
+            return task, f"env RALPH_BLIND_TDD_TASK={env_id}"
+        # Env var set but no match — that's an error, not a skip
+        return None, f"env RALPH_BLIND_TDD_TASK={env_id} but task not found in plan.md"
+
+    # (b) .themis/current_task.json
+    state_file = Path(".themis") / "current_task.json"
+    if state_file.exists():
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id"):
+                # If it's a full task spec, use it directly; otherwise look it
+                # up in plan.md by id.
+                if "acceptance_criteria" in data or "public_surface" in data:
+                    return data, f"{state_file}"
+                task = _find_task_in_plan(str(data["id"]))
+                if task is not None:
+                    return task, f"{state_file} → plan.md"
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # (c) plan.md fallback — first task with passes:false
+    task = _find_first_incomplete_task()
+    if task is not None:
+        return task, "plan.md first incomplete task"
+
+    return None, "no current task resolvable"
+
+
+def _find_task_in_plan(task_id: str) -> dict | None:
+    """Locate a task by id inside plan.md JSON code blocks."""
+    for plan_path in ("plan.md", "fix_plan.md"):
+        p = Path(plan_path)
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for block in _extract_json_blocks(text):
+            try:
+                obj = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            for task in _iter_tasks(obj):
+                if str(task.get("id", "")) == task_id:
+                    return task
+    return None
+
+
+def _find_first_incomplete_task() -> dict | None:
+    """Return the first task in plan.md with `passes: false`."""
+    for plan_path in ("plan.md", "fix_plan.md"):
+        p = Path(plan_path)
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for block in _extract_json_blocks(text):
+            try:
+                obj = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            for task in _iter_tasks(obj):
+                # Skip tasks marked `deferred_at`; auto-pick would stage a
+                # blind-TDD brief that the user explicitly paused. Explicit
+                # selection (RALPH_BLIND_TDD_TASK or .themis/current_task.json)
+                # still wins — those override the deferral by design.
+                if task.get("passes") is False and not task.get("deferred_at"):
+                    return task
+    return None
+
+
+def _extract_json_blocks(text: str) -> list[str]:
+    """Yield the inside of every ```json ... ``` fence in the text."""
+    blocks: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip().startswith("```json"):
+            i += 1
+            buf: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                buf.append(lines[i])
+                i += 1
+            if buf:
+                blocks.append("\n".join(buf))
+        i += 1
+    return blocks
+
+
+def _iter_tasks(obj) -> list[dict]:
+    """Flatten a plan JSON object into a list of task dicts."""
+    out: list[dict] = []
+    if isinstance(obj, dict):
+        if "id" in obj and ("title" in obj or "description" in obj or "acceptance_criteria" in obj):
+            out.append(obj)
+        for key in ("tasks", "items", "backlog"):
+            v = obj.get(key)
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        out.append(item)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                out.append(item)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Red-state persistence
+# ---------------------------------------------------------------------------
+
+def _red_state_path(task_id: str) -> Path:
+    return Path(".themis") / "blind_tdd" / "red_state" / f"{task_id}.json"
+
+
+def save_red_state(task_id: str, result: RedPhaseResult) -> None:
+    p = _red_state_path(task_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "task_id": task_id,
+        "timestamp": _now_iso(),
+        "test_file_hashes": result.test_file_hashes,
+        "triage_report": result.triage_report,
+        "spawn_agent_id": (result.spawn_result or {}).get("agent_id"),
+    }
+    p.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_red_state(task_id: str) -> dict | None:
+    p = _red_state_path(task_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def clear_red_state(task_id: str) -> None:
+    p = _red_state_path(task_id)
+    if p.exists():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _red_state_to_result(state: dict) -> RedPhaseResult:
+    return RedPhaseResult(
+        passed=True,
+        reason="loaded from red state",
+        test_file_hashes=dict(state.get("test_file_hashes") or {}),
+        triage_report=dict(state.get("triage_report") or {}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator construction
+# ---------------------------------------------------------------------------
+
+def _make_orchestrator(btd_cfg: dict) -> BlindTddOrchestrator:
+    spawner_kind = btd_cfg["spawner"]
+    if spawner_kind == "claude_code":
+        try:
+            from .spawners.claude_code_spawner import ClaudeCodeSpawner
+        except ImportError:
+            spawner = ManualSpawner()
+        else:
+            spawner = ClaudeCodeSpawner(
+                ralph_home=btd_cfg.get("ralph_home"),
+                claude_binary=btd_cfg.get("claude_binary", "claude"),
+                timeout_seconds=btd_cfg.get("spawn_timeout_seconds", 1800),
+                strip_api_key=(btd_cfg.get("spawn_auth", "subscription") != "api"),
+            )
+    else:
+        spawner = ManualSpawner()
+
+    # Resolve prompt template paths relative to RALPH_HOME if possible.
+    ralph_home = btd_cfg.get("ralph_home") or os.environ.get("RALPH_HOME")
+    if ralph_home:
+        base = Path(ralph_home) / "templates" / "blind_tdd" / "prompts"
+    else:
+        # Derive from this module's location: tools/blind_tdd/gate_integration.py
+        base = Path(__file__).resolve().parents[1] / "templates" / "blind_tdd" / "prompts"
+
+    return BlindTddOrchestrator(
+        spawner=spawner,
+        test_dirs=btd_cfg["test_dirs"],
+        writer_prompt_path=str(base / "test_writer.md"),
+        runner_prompt_path=str(base / "test_runner.md"),
+        arbiter_prompt_path=str(base / "arbiter.md"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public result object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BlindGateResult:
+    passed: bool
+    phase: str  # "skipped" | "red" | "green" | "error"
+    message: str
+    reason: str = ""
+    task_id: str | None = None
+    details: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point — called from smart_gate.main()
+# ---------------------------------------------------------------------------
+
+def _check_warn_mode_staleness(btd_cfg: dict) -> None:
+    """Emit a prominent warning if blind_tdd enforcement has been 'warn'
+    for more than 30 days. Writes to stderr + .themis/alerts.log.
+
+    The adoption guide recommends starting in warn mode to validate the
+    flow, then flipping to strict once the first task passes. This check
+    catches projects that forget to promote.
+    """
+    import time as _time
+
+    if btd_cfg["enforcement"] != "warn":
+        return
+
+    marker = Path(".themis") / "blind_tdd_warn_since.json"
+    ralph_dir = Path(".themis")
+    ralph_dir.mkdir(parents=True, exist_ok=True)
+    now = _time.time()
+
+    if not marker.exists():
+        try:
+            marker.write_text(
+                json.dumps({"warn_since": now, "note": "auto-created on first warn-mode gate run"}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return
+
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        warn_since = float(data.get("warn_since", now))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+
+    days = (now - warn_since) / 86400
+    if days < 30:
+        return
+
+    msg = (
+        f"⚠ blind_tdd enforcement has been 'warn' for {int(days)} days.\n"
+        f"  The adoption guide recommends flipping to 'strict' after the\n"
+        f"  first successful gated task. Edit gate.blind_tdd.enforcement\n"
+        f"  in ralph.config.json to 'strict', or set it back to 'strict'\n"
+        f"  to dismiss this warning."
+    )
+    print(msg, file=sys.stderr)
+    try:
+        ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+        with open(ralph_dir / "alerts.log", "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] blind_tdd warn-mode stale ({int(days)}d)\n")
+    except OSError:
+        pass
+
+
+def run_blind_tdd_gate(config: dict) -> BlindGateResult:
+    """Run the appropriate blind-TDD phase for the current task.
+
+    Returns a BlindGateResult. Never raises — any internal failure is
+    represented as `passed=False, phase="error"` with a reason.
+    """
+    btd_cfg = get_blind_tdd_config(config)
+
+    if not btd_cfg["enabled"]:
+        return BlindGateResult(
+            passed=True, phase="skipped",
+            message="blind-tdd disabled in config",
+        )
+
+    _check_warn_mode_staleness(btd_cfg)
+
+    task, source = load_current_task(config)
+    if task is None:
+        # If the user has the gate enabled but no task is resolvable, we
+        # still allow the commit but log a clear message. An alternative
+        # would be to fail — but then doc-only commits get blocked.
+        return BlindGateResult(
+            passed=True, phase="skipped",
+            message=f"blind-tdd enabled but no current task ({source})",
+        )
+
+    task_id = str(task.get("id", "unknown"))
+
+    # Validate the task spec before spending API budget on an agent spawn.
+    vr = validate_task(task)
+    if not vr.valid:
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="error",
+            message=(
+                f"task {task_id!r} failed blind-tdd schema validation:\n"
+                + "\n".join(f"  - {e}" for e in vr.errors)
+            ),
+            reason="schema_invalid",
+            task_id=task_id,
+            details={"errors": vr.errors, "warnings": vr.warnings, "source": source},
+        )
+
+    # Preflight: structural quality check before we burn API budget.
+    # Controlled by gate.blind_tdd.preflight = strict | warn | off (default strict).
+    preflight = preflight_task(task, config)
+    if not preflight.ready:
+        # strict mode, at least one check failed
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="error",
+            message=(
+                f"task {task_id!r} failed blind-tdd preflight checks:\n"
+                + "\n".join(f"  - {e}" for e in preflight.errors)
+            ),
+            reason="preflight_failed",
+            task_id=task_id,
+            details={
+                "preflight_mode": preflight.mode,
+                "errors": preflight.errors,
+                "warnings": preflight.warnings,
+                "source": source,
+            },
+        )
+
+    orch = _make_orchestrator(btd_cfg)
+
+    # Have we already completed the red phase for this task?
+    red_state = load_red_state(task_id)
+
+    if red_state is None:
+        # ---- RED PHASE ----
+        try:
+            red = orch.run_red_phase(task)
+        except Exception as e:  # defensive — must never raise to smart_gate
+            return BlindGateResult(
+                passed=False, phase="error",
+                message=f"red phase crashed: {type(e).__name__}: {e}",
+                reason="red_crash",
+                task_id=task_id,
+            )
+
+        if not red.passed:
+            # Manual spawner is a special non-failure: it's an advisory
+            # "brief staged, run the agent, re-invoke the gate".
+            is_manual_pending = bool((red.spawn_result or {}).get("manual_mode"))
+            if is_manual_pending:
+                return BlindGateResult(
+                    passed=True,
+                    phase="red_pending",
+                    message=(
+                        f"manual spawner staged brief for task {task_id!r} at "
+                        f"{(red.spawn_result or {}).get('brief_path', '<unknown>')}. "
+                        f"Run the writer agent and re-invoke the gate to continue."
+                    ),
+                    task_id=task_id,
+                    details={"spawn_result": red.spawn_result},
+                )
+            fail = btd_cfg["enforcement"] == "strict"
+            return BlindGateResult(
+                passed=not fail,
+                phase="red",
+                message=f"red phase did not pass: {red.reason}",
+                reason="red_failed",
+                task_id=task_id,
+                details={
+                    "spawn_result": red.spawn_result,
+                    "violations": red.violations,
+                    "missing_criteria": red.coverage.missing if red.coverage else [],
+                },
+            )
+
+        save_red_state(task_id, red)
+
+        return BlindGateResult(
+            passed=True, phase="red",
+            message=(
+                f"red phase passed for task {task_id!r}. "
+                f"{len(red.test_file_hashes)} test file(s) hashed. "
+                f"Implementation phase may begin."
+            ),
+            task_id=task_id,
+            details={
+                "tested_criteria": sorted((red.coverage.covered_by_tests or {}).keys())
+                if red.coverage else [],
+                "needs_human_criteria": red.coverage.covered_by_triage if red.coverage else [],
+                "test_file_count": len(red.test_file_hashes),
+            },
+        )
+
+    # ---- GREEN PHASE ----
+    red_result = _red_state_to_result(red_state)
+    try:
+        green = orch.run_green_phase(task, red_result)
+    except Exception as e:
+        return BlindGateResult(
+            passed=False, phase="error",
+            message=f"green phase crashed: {type(e).__name__}: {e}",
+            reason="green_crash",
+            task_id=task_id,
+        )
+
+    if not green.passed:
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="green",
+            message=f"green phase did not pass: {green.reason}",
+            reason="green_failed",
+            task_id=task_id,
+            details={
+                "hash_match": green.hash_match,
+                "violations": green.violations,
+                "green_report_summary": _summarize_green(green),
+            },
+        )
+
+    # Green pass → clear red state so the next task starts fresh
+    clear_red_state(task_id)
+
+    # Optional post-green quality review (advisory deep-interview-style).
+    # Skipped when the config flag is off or the reviewer artifact is
+    # already fresh. Returns its own phase on first invocation so the
+    # LLM knows to conduct the interview.
+    qr_cfg = btd_cfg.get("quality_review") or {}
+    if isinstance(qr_cfg, dict) and qr_cfg.get("enabled"):
+        qr_result = _run_quality_review_phase(task, task_id, btd_cfg["test_dirs"])
+        if qr_result is not None:
+            return qr_result
+
+    return BlindGateResult(
+        passed=True, phase="green",
+        message=(
+            f"green phase passed for task {task_id!r}: "
+            f"{green.green_report.get('tests_passed', 0)} test(s) passing, "
+            f"coverage verified."
+        ),
+        task_id=task_id,
+        details={
+            "tests_passed": green.green_report.get("tests_passed"),
+            "tests_failed": green.green_report.get("tests_failed"),
+            "hash_match": True,
+        },
+    )
+
+
+def _run_quality_review_phase(
+    task: dict,
+    task_id: str,
+    test_dirs: list[str],
+) -> "BlindGateResult | None":
+    """Post-green deep-interview-style quality review. Returns a
+    BlindGateResult with phase="quality_review_pending" on first run (staging
+    a brief for the LLM to pick up), or None if the review is already
+    complete (caller falls through to the normal green return).
+
+    Advisory only — failure to adjudicate does not block the commit in warn
+    mode. The interview output at
+    `.themis/blind_tdd/quality_review/<task_id>.md` is a human-curated
+    artifact; this function never writes it automatically.
+    """
+    from . import quality_review as qr
+    ralph_home = os.environ.get("RALPH_HOME")
+    if ralph_home:
+        prompt_path = Path(ralph_home) / "prompts" / "quality-reviewer.md"
+    else:
+        prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "quality-reviewer.md"
+
+    # Enumerate test files from the configured test_dirs. Cheaper than
+    # threading test_file_hashes through from the green phase, and equivalent
+    # since the green runner just verified the full set.
+    test_files: list[Path] = []
+    for td in test_dirs:
+        d = Path(td)
+        if d.is_dir():
+            test_files.extend(p for p in d.rglob("test_*.py") if p.is_file())
+    public_module = (task.get("public_surface") or {}).get("module")
+    src_files: list[Path] = []
+    if public_module:
+        p = Path(public_module)
+        if p.exists():
+            src_files.append(p)
+
+    brief_path = qr.PENDING_DIR / f"{task_id}.md"
+    if qr.is_review_complete(task_id, brief_path):
+        # Clean up the stale brief after the review was finalized.
+        try:
+            brief_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None  # caller returns normal green pass
+
+    scan_result = qr.scan(task_id, test_files, src_files, public_module=public_module)
+
+    # Scanner found nothing — auto-complete with a clean review.
+    if scan_result.is_clean():
+        qr.FINAL_DIR.mkdir(parents=True, exist_ok=True)
+        qr.final_review_path(task_id).write_text(
+            f"# Quality Review — `{task_id}`\n\n"
+            "**Verdict:** PASS\n\n"
+            "Scanner surfaced zero candidates; no interview needed.\n",
+            encoding="utf-8",
+        )
+        return None
+
+    qr.write_pending_brief(scan_result, prompt_path)
+    return BlindGateResult(
+        passed=True,
+        phase="quality_review_pending",
+        message=(
+            f"quality review staged for task {task_id!r}: "
+            f"{len(scan_result.candidates)} candidate(s) at {brief_path}. "
+            f"Run the reviewer (conduct interview via AskUserQuestion) and "
+            f"write the final verdict to {qr.final_review_path(task_id)}."
+        ),
+        task_id=task_id,
+        details={
+            "candidate_count": len(scan_result.candidates),
+            "candidate_kinds": sorted({c.kind for c in scan_result.candidates}),
+            "brief_path": str(brief_path),
+            "final_path": str(qr.final_review_path(task_id)),
+        },
+    )
+
+
+def _summarize_green(green: GreenPhaseResult) -> dict:
+    rep = green.green_report or {}
+    return {
+        "tests_collected": rep.get("tests_collected"),
+        "tests_passed": rep.get("tests_passed"),
+        "tests_failed": rep.get("tests_failed"),
+        "overall": rep.get("overall"),
+    }

@@ -1,0 +1,41 @@
+{
+  "_comment": "Settings for Blind TDD Agent #3 (arbiter). Ruling-only agent. Read-only access to task spec, public_api.md, the specific disputed test, and the challenge text. No Bash, no Edit, no Write. Emits a ruling via a write to a single specific file allowed by the orchestrator.",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "WebFetch"
+    ],
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "NotebookEdit"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_path_guard.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_audit.py"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "_comment": "Settings for Blind TDD Agent #2 (test runner). Bash is allowed ONLY for test-runner commands (pytest, jest, dotnet test, etc.) — never for cat/grep/find which would bypass Layer 1. Read/Grep/Glob guarded by PreToolUse hook. Test files are read-only for this agent (Edit/Write denied).",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(pytest*)",
+      "Bash(python -m pytest*)",
+      "Bash(python3 -m pytest*)",
+      "Bash(npm test*)",
+      "Bash(npm run test*)",
+      "Bash(yarn test*)",
+      "Bash(yarn run test*)",
+      "Bash(jest*)",
+      "Bash(vitest*)",
+      "Bash(dotnet test*)",
+      "Bash(cargo test*)",
+      "Bash(go test*)",
+      "Bash(mvn test*)",
+      "Bash(gradle test*)"
+    ],
+    "deny": [
+      "Bash(cat*)",
+      "Bash(less*)",
+      "Bash(more*)",
+      "Bash(head*)",
+      "Bash(tail*)",
+      "Bash(grep*)",
+      "Bash(rg*)",
+      "Bash(ripgrep*)",
+      "Bash(find*)",
+      "Bash(ls*)",
+      "Bash(tree*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git diff*)",
+      "Bash(git blame*)",
+      "Edit",
+      "Write",
+      "NotebookEdit"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_path_guard.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_audit.py"
+          }
+        ]
+      }
+    ]
+  }
+}
