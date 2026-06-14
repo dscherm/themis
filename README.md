@@ -1,5 +1,7 @@
 # Themis — a blind TDD gate
 
+[![CI](https://github.com/dscherm/themis/actions/workflows/ci.yml/badge.svg)](https://github.com/dscherm/themis/actions/workflows/ci.yml)
+
 > *Themis is the blindfolded figure of impartial judgment. So is this gate.*
 
 **Themis enforces test-first development by an agent that is structurally prevented from seeing the implementation.** A fresh "blind writer" agent derives the acceptance tests from the spec *alone* — it cannot read your source, your examples, or any generated data. Those tests are hash-locked before a single line of implementation is written, a separate "blind runner" agent produces the verified green report, and a third "arbiter" agent rules on any dispute.
