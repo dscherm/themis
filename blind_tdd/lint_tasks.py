@@ -444,7 +444,7 @@ if __name__ == "__main__":
     parser.add_argument("--observations",
                         default=".themis/observations.jsonl",
                         help="Path to observations.jsonl")
-    parser.add_argument("--config", default="ralph.config.json",
+    parser.add_argument("--config", default="themis.config.json",
                         help="Path to project config (for preflight integration)")
     args = parser.parse_args()
 

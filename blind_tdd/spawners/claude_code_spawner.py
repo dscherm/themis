@@ -26,7 +26,7 @@ like any other `claude -p` invocation.
 
 ## Template resolution
 
-The spawner needs to know where the ralph-universal templates live so it can
+The spawner needs to know where the Themis templates live so it can
 copy hook scripts and settings files. This is controlled by `ralph_home` which
 defaults to the `RALPH_HOME` env var, then the installed package location.
 
@@ -107,9 +107,10 @@ class ClaudeCodeSpawner:
     """Spawns blind agents as fresh `claude -p` subprocesses.
 
     Args:
-        ralph_home: Path to the ralph-universal install (for templates/).
-            Defaults to the `RALPH_HOME` env var, falling back to detecting
-            it from this module's own location.
+        themis_home: Path to the Themis checkout (for templates/). Defaults
+            to the `THEMIS_HOME` env var (or legacy `RALPH_HOME`), falling back
+            to detecting it from this module's own location. `ralph_home` is
+            accepted as a deprecated alias.
         claude_binary: Name or path of the `claude` executable.
         timeout_seconds: How long to wait for an agent subprocess to finish.
         project_root: The project the agent should run in. Defaults to cwd.
@@ -120,7 +121,7 @@ class ClaudeCodeSpawner:
     def __init__(
         self,
         *,
-        ralph_home: str | Path | None = None,
+        themis_home: str | Path | None = None,
         claude_binary: str | list[str] = "claude",
         timeout_seconds: int = 1800,
         project_root: str | Path | None = None,
@@ -128,8 +129,10 @@ class ClaudeCodeSpawner:
         hooks_dir: str = ".claude/hooks",
         model: str | None = None,
         strip_api_key: bool = True,
+        ralph_home: str | Path | None = None,  # deprecated alias for themis_home
     ) -> None:
-        self.themis_home = Path(ralph_home) if ralph_home else _default_ralph_home()
+        _home = themis_home if themis_home is not None else ralph_home
+        self.themis_home = Path(_home) if _home else _default_themis_home()
         self.claude_binary = claude_binary
         self.timeout_seconds = timeout_seconds
         self.project_root = Path(project_root) if project_root else Path.cwd()
@@ -370,12 +373,12 @@ class ClaudeCodeSpawner:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _default_ralph_home() -> Path:
-    """Resolve RALPH_HOME from env, then from this module's location."""
-    env = os.environ.get("RALPH_HOME")
+def _default_themis_home() -> Path:
+    """Resolve THEMIS_HOME (or legacy RALPH_HOME) from env, then this module's location."""
+    env = os.environ.get("THEMIS_HOME") or os.environ.get("RALPH_HOME")
     if env:
         return Path(env)
-    # tools/blind_tdd/spawners/claude_code_spawner.py → ../../../
+    # blind_tdd/spawners/claude_code_spawner.py → repo root
     here = Path(__file__).resolve()
     return here.parents[2]
 
@@ -465,7 +468,7 @@ if __name__ == "__main__":
     task_id = sys.argv[2]
 
     spawner = ClaudeCodeSpawner()
-    print(f"ralph_home:      {spawner.themis_home}")
+    print(f"themis_home:      {spawner.themis_home}")
     print(f"project_root:    {spawner.project_root}")
     print(f"settings target: {spawner.project_root / spawner.settings_path}")
     print(f"hooks dir:       {spawner.project_root / spawner.hooks_dir}")

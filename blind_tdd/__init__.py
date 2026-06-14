@@ -1,4 +1,4 @@
-"""Blind TDD gate infrastructure for ralph-universal.
+"""Blind TDD gate infrastructure for Themis.
 
 See `docs/reference/blind-tdd-gate-rfc.md` for the full design.
 

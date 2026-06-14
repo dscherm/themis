@@ -894,7 +894,7 @@ class BlindTddOrchestrator:
         if not p.exists():
             raise FileNotFoundError(
                 f"Blind TDD prompt template not found at {p}. "
-                f"Install ralph-universal templates/blind_tdd/prompts/."
+                f"Install Themis templates/blind_tdd/prompts/."
             )
         return p.read_text(encoding="utf-8")
 

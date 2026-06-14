@@ -91,7 +91,7 @@ def get_blind_tdd_config(config: dict) -> dict:
         "spawn_auth": str(raw.get("spawn_auth", "subscription")),  # "subscription" | "api"
         "quality_review": raw.get("quality_review") or {},  # {"enabled": bool}
         "claude_binary": str(raw.get("claude_binary", "claude")),
-        "ralph_home": raw.get("ralph_home"),  # None → autodetect
+        "themis_home": raw.get("themis_home", raw.get("ralph_home")),  # None → autodetect; ralph_home = legacy alias
         "spawn_timeout_seconds": int(raw.get("spawn_timeout_seconds", 1800)),
         "preflight": str(raw.get("preflight", "strict")),
     }
@@ -107,14 +107,17 @@ def load_current_task(config: dict) -> tuple[dict | None, str]:
     Returns (task_dict, source_description).
     task_dict is None if no task could be resolved.
     """
-    # (a) Env var override
-    env_id = os.environ.get("RALPH_BLIND_TDD_TASK", "").strip()
+    # (a) Env var override (THEMIS_TASK; RALPH_BLIND_TDD_TASK is a legacy alias)
+    themis_env = os.environ.get("THEMIS_TASK", "").strip()
+    legacy_env = os.environ.get("RALPH_BLIND_TDD_TASK", "").strip()
+    env_id = themis_env or legacy_env
+    env_name = "THEMIS_TASK" if themis_env else "RALPH_BLIND_TDD_TASK"
     if env_id:
         task = _find_task_in_plan(env_id)
         if task is not None:
-            return task, f"env RALPH_BLIND_TDD_TASK={env_id}"
+            return task, f"env {env_name}={env_id}"
         # Env var set but no match — that's an error, not a skip
-        return None, f"env RALPH_BLIND_TDD_TASK={env_id} but task not found in plan.md"
+        return None, f"env {env_name}={env_id} but task not found in plan.md"
 
     # (b) .themis/current_task.json
     state_file = Path(".themis") / "current_task.json"
@@ -285,7 +288,7 @@ def _make_orchestrator(btd_cfg: dict) -> BlindTddOrchestrator:
             spawner = ManualSpawner()
         else:
             spawner = ClaudeCodeSpawner(
-                ralph_home=btd_cfg.get("ralph_home"),
+                themis_home=btd_cfg.get("themis_home"),
                 claude_binary=btd_cfg.get("claude_binary", "claude"),
                 timeout_seconds=btd_cfg.get("spawn_timeout_seconds", 1800),
                 strip_api_key=(btd_cfg.get("spawn_auth", "subscription") != "api"),
@@ -293,12 +296,13 @@ def _make_orchestrator(btd_cfg: dict) -> BlindTddOrchestrator:
     else:
         spawner = ManualSpawner()
 
-    # Resolve prompt template paths relative to RALPH_HOME if possible.
-    ralph_home = btd_cfg.get("ralph_home") or os.environ.get("RALPH_HOME")
-    if ralph_home:
-        base = Path(ralph_home) / "templates" / "blind_tdd" / "prompts"
+    # Resolve prompt template paths relative to a configured home, if any
+    # (THEMIS_HOME / config themis_home; RALPH_HOME is a legacy alias).
+    home = btd_cfg.get("themis_home") or os.environ.get("THEMIS_HOME") or os.environ.get("RALPH_HOME")
+    if home:
+        base = Path(home) / "templates" / "blind_tdd" / "prompts"
     else:
-        # Derive from this module's location: tools/blind_tdd/gate_integration.py
+        # Derive from this module's location: blind_tdd/gate_integration.py
         base = Path(__file__).resolve().parents[1] / "templates" / "blind_tdd" / "prompts"
 
     return BlindTddOrchestrator(
@@ -370,7 +374,7 @@ def _check_warn_mode_staleness(btd_cfg: dict) -> None:
         f"⚠ blind_tdd enforcement has been 'warn' for {int(days)} days.\n"
         f"  The adoption guide recommends flipping to 'strict' after the\n"
         f"  first successful gated task. Edit gate.blind_tdd.enforcement\n"
-        f"  in ralph.config.json to 'strict', or set it back to 'strict'\n"
+        f"  (gate.blind_tdd.enforcement) to 'strict', or set it back to 'strict'\n"
         f"  to dismiss this warning."
     )
     print(msg, file=sys.stderr)
@@ -586,9 +590,9 @@ def _run_quality_review_phase(
     artifact; this function never writes it automatically.
     """
     from . import quality_review as qr
-    ralph_home = os.environ.get("RALPH_HOME")
-    if ralph_home:
-        prompt_path = Path(ralph_home) / "prompts" / "quality-reviewer.md"
+    home = os.environ.get("THEMIS_HOME") or os.environ.get("RALPH_HOME")
+    if home:
+        prompt_path = Path(home) / "prompts" / "quality-reviewer.md"
     else:
         prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "quality-reviewer.md"
 

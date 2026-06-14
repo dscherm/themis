@@ -483,7 +483,7 @@ def make_sandbox(probe: ProbeTemplate, arm: str, root: Path | None = None) -> Pa
     """Build an isolated probe sandbox and return its path.
 
     Everything the gate needs lives inside the returned directory:
-    ralph.config.json (sync_to_global=false; blind gate enabled iff
+    themis.config.json (sync_to_global=false; blind gate enabled iff
     arm == "on"), plan.md holding only the probe task, public_api.md from
     the template, and empty test dirs. `git init` is best-effort so the
     gate's change detection works. Nothing is written outside the sandbox.
@@ -496,7 +496,7 @@ def make_sandbox(probe: ProbeTemplate, arm: str, root: Path | None = None) -> Pa
     sandbox = base / f"{probe.probe_id}-{arm}"
     sandbox.mkdir(parents=True, exist_ok=True)
 
-    (sandbox / "ralph.config.json").write_text(
+    (sandbox / "themis.config.json").write_text(
         json.dumps(_sandbox_config(arm, probe), indent=2), encoding="utf-8"
     )
     (sandbox / "plan.md").write_text(

@@ -107,9 +107,10 @@ class AgentSdkSpawner:
             to "acceptEdits" so the blind agent can write test files.
         install_hooks: if True, the blind-TDD path guard and audit
             hook scripts are registered via the SDK's `hooks` option.
-        ralph_home: path to the ralph-universal install (for locating
-            hook template scripts). Defaults to RALPH_HOME env var,
-            falling back to the module's computed location.
+        themis_home: path to the Themis checkout (for locating hook
+            template scripts). Defaults to the THEMIS_HOME env var (or legacy
+            RALPH_HOME), falling back to the module's computed location.
+            `ralph_home` is accepted as a deprecated alias.
     """
 
     def __init__(
@@ -120,15 +121,17 @@ class AgentSdkSpawner:
         model: str | None = None,
         permission_mode: str = "acceptEdits",
         install_hooks: bool = True,
-        ralph_home: str | Path | None = None,
+        themis_home: str | Path | None = None,
+        ralph_home: str | Path | None = None,  # deprecated alias for themis_home
     ) -> None:
         self._sdk = sdk
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.model = model
         self.permission_mode = permission_mode
         self.install_hooks = install_hooks
+        _home = themis_home if themis_home is not None else ralph_home
         self.themis_home = (
-            Path(ralph_home) if ralph_home else _default_ralph_home()
+            Path(_home) if _home else _default_themis_home()
         )
         self._last_diagnostics: SpawnDiagnostics | None = None
 
@@ -336,8 +339,8 @@ class AgentSdkSpawner:
 # self-contained — no cross-module coupling)
 # ---------------------------------------------------------------------------
 
-def _default_ralph_home() -> Path:
-    env = os.environ.get("RALPH_HOME")
+def _default_themis_home() -> Path:
+    env = os.environ.get("THEMIS_HOME") or os.environ.get("RALPH_HOME")
     if env:
         return Path(env)
     here = Path(__file__).resolve()
@@ -405,7 +408,7 @@ if __name__ == "__main__":
     task_id = sys.argv[2]
 
     spawner = AgentSdkSpawner()
-    print(f"ralph_home:       {spawner.themis_home}")
+    print(f"themis_home:       {spawner.themis_home}")
     print(f"project_root:     {spawner.project_root}")
     print(f"allowed tools:    {_ROLE_TO_TOOLS.get(role, [])}")
     print(f"expected outputs: {_expected_outputs_for(role, {'task_id': task_id})}")

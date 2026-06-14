@@ -23,7 +23,7 @@ driver is split:
 
 ## Sandbox isolation (the BT2 gap this closes)
 
-`probes.make_sandbox` writes `ralph.config.json` but installs no hooks, so a
+`probes.make_sandbox` writes `themis.config.json` but installs no hooks, so a
 fresh sandbox does NOT enforce blindness — a subagent could read/edit anything,
 including hash-locked tests, which would make an ON-arm run meaningless.
 `install_sandbox_isolation()` copies the path-guard + audit hooks and a
@@ -63,7 +63,7 @@ relative to its own CWD:
     record = finalize(probe, state["sandbox"], "on")   # classify + append
 
 The OFF arm skips sessions and the blind gate entirely (the sandbox's
-`ralph.config.json` has `blind_tdd.enabled=false`); the implementer subagent
+`themis.config.json` has `blind_tdd.enabled=false`); the implementer subagent
 sees and may edit the tests:
 
     state = prepare(probe, "off")            # off-ready (sandbox, no gate)
@@ -347,7 +347,7 @@ def deactivate_host_session(repo_root: str | Path | None = None) -> dict | None:
 _GATE_SNIPPET = (
     "import json,sys\n"
     "from blind_tdd.gate_integration import run_blind_tdd_gate\n"
-    "cfg=json.load(open('ralph.config.json',encoding='utf-8'))\n"
+    "cfg=json.load(open('themis.config.json',encoding='utf-8'))\n"
     "r=run_blind_tdd_gate(cfg)\n"
     "out={'phase':getattr(r,'phase',None),'passed':getattr(r,'passed',None),"
     "'reason':getattr(r,'reason','')}\n"
@@ -368,6 +368,7 @@ def run_gate(sandbox: str | Path) -> dict:
     tools_dir = str(_REPO_ROOT / "tools")
     env["PYTHONPATH"] = tools_dir + os.pathsep + env.get("PYTHONPATH", "")
     # Keep the gate from picking up a stray host task override.
+    env.pop("THEMIS_TASK", None)
     env.pop("RALPH_BLIND_TDD_TASK", None)
 
     proc = subprocess.run(

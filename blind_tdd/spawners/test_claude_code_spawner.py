@@ -143,7 +143,7 @@ def _make_fake_claude(dir_path: Path, *, task_id: str, role: str,
 
 
 def _setup_fake_ralph_home(tmp: Path) -> Path:
-    """Create a minimal ralph-universal template tree."""
+    """Create a minimal Themis template tree."""
     ralph = tmp / "ralph_home"
     (ralph / "templates" / "blind_tdd").mkdir(parents=True)
     (ralph / "templates" / "hooks").mkdir(parents=True)

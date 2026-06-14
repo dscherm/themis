@@ -30,7 +30,7 @@ if not result.passed:
     raise SystemExit(result.reason)
 ```
 
-You call that from wherever you gate commits — a `pre-commit` hook, a CI step, or your own task runner. There is no required host harness: `config` is just a dict you construct (typically loaded from a JSON file you own). Themis was extracted from a larger harness, so a few identifiers still carry that origin (`RALPH_BLIND_TDD_TASK`, the `ralph_home` config key) — see [Naming](#naming) at the end; none of them require that harness to be present.
+You call that from wherever you gate commits — a `pre-commit` hook, a CI step, or your own task runner. There is no required host harness: `config` is just a dict you construct (typically loaded from a JSON file you own). Themis was extracted from a larger harness, so the original `RALPH_*` / `ralph_home` identifiers are still honored as silent legacy aliases — see [Naming](#naming) at the end.
 
 ## Prerequisites
 
@@ -216,7 +216,7 @@ result = run_blind_tdd_gate(config)
 | `max_challenges_per_task` | `3` | Cap on the implementer's ability to dispute tests |
 | `max_challenges_per_criterion` | `1` | Per-criterion challenge cap |
 | `human_input_timeout` | `3600` | Seconds to wait for a human check-in before auto-failing |
-| `ralph_home` | _(unset)_ | **Optional.** Overrides where prompt/hook templates are found. Leave unset standalone — templates resolve relative to the installed package. (Historical name; see [Naming](#naming).) |
+| `themis_home` | _(unset)_ | **Optional.** Overrides where prompt/hook templates are found. Leave unset standalone — templates resolve relative to the installed package. (Legacy alias: `ralph_home`.) |
 | `claude_binary` | `"claude"` | Path or name of the claude CLI |
 | `spawn_timeout_seconds` | `1800` | Per-agent spawn timeout |
 
@@ -228,7 +228,7 @@ Tell the gate which task it's working on. Three sources, checked in order:
 
 1. **Env var** (explicit override, useful for CI and ad-hoc runs):
    ```bash
-   export RALPH_BLIND_TDD_TASK=task-engine-invoke-repeating
+   export THEMIS_TASK=task-engine-invoke-repeating   # legacy alias: RALPH_BLIND_TDD_TASK
    ```
 2. **State file**:
    ```bash
@@ -293,7 +293,7 @@ The gate fails under strict enforcement. If the implementer believes a specific 
 
 ## Troubleshooting
 
-**"no current task resolvable"** — set `RALPH_BLIND_TDD_TASK` or `.themis/current_task.json`, or make sure `plan.md` has a task with `passes: false`.
+**"no current task resolvable"** — set `THEMIS_TASK` (or legacy `RALPH_BLIND_TDD_TASK`) or `.themis/current_task.json`, or make sure `plan.md` has a task with `passes: false`.
 
 **"task failed blind-tdd schema validation"** — run `python -m blind_tdd.lint_tasks plan.md` and fix the errors. Common issues: missing `public_surface.module`, criterion id that isn't `AC-\d+`, empty `acceptance_criteria`.
 
@@ -303,17 +303,19 @@ The gate fails under strict enforcement. If the implementer believes a specific 
 
 **Hash mismatch between red and green** — a test file was modified between phases. Typically this means the implementing agent edited a test to make it pass. Revert the test file and re-run. (This is the load-bearing defense; see [`impossible-ac-results.md`](./impossible-ac-results.md) §5.)
 
-**Templates not found** — if you moved the package or installed it oddly, set `ralph_home` in config (or the `RALPH_HOME` env var) to your Themis checkout so the prompt/hook templates resolve.
+**Templates not found** — if you moved the package or installed it oddly, set `themis_home` in config (or the `THEMIS_HOME` env var) to your Themis checkout so the prompt/hook templates resolve.
 
 ## Naming
 
-Themis was extracted from a harness named `ralph-universal`, and a few identifiers still carry that prefix:
+The preferred identifiers are `THEMIS_TASK`, `THEMIS_HOME`, and the `themis_home` config key / constructor parameter. Themis was extracted from a harness named `ralph-universal`, so the original names are still honored as **silent legacy aliases** — you don't need to change anything if you were already using them:
 
-- `RALPH_BLIND_TDD_TASK` — the current-task override env var
-- `ralph_home` — the optional config key / `RALPH_HOME` env var for locating templates
-- occasional log/error strings mentioning `ralph.config.json`
+| Preferred | Legacy alias (still works) |
+|---|---|
+| `THEMIS_TASK` env var | `RALPH_BLIND_TDD_TASK` |
+| `THEMIS_HOME` env var | `RALPH_HOME` |
+| `themis_home` config key / ctor param | `ralph_home` |
 
-These are functional and harness-independent — none require `ralph-universal` to be installed — but they are slated for a rename. Use them as written for now.
+When both are set, the `THEMIS_*` value wins.
 
 ## Further reading
 
