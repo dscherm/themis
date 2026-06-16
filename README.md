@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/dscherm/themis/actions/workflows/ci.yml/badge.svg)](https://github.com/dscherm/themis/actions/workflows/ci.yml)
 
-A blind test-first gate for AI-written code. It enforces that the agent which checks the work cannot see, or quietly edit, the work it is checking.
+A test-first gate for AI-written code: the agent that writes the tests can't see the implementation, and the tests can't be edited once sealed.
 
 ## What it is
 
