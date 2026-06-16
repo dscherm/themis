@@ -1,101 +1,99 @@
-# Themis — a blind TDD gate
+# Themis
 
 [![CI](https://github.com/dscherm/themis/actions/workflows/ci.yml/badge.svg)](https://github.com/dscherm/themis/actions/workflows/ci.yml)
 
-> *Themis is the blindfolded figure of impartial judgment. So is this gate.*
+A blind test-first gate for AI-written code. It enforces that the agent which checks the work cannot see, or quietly edit, the work it is checking.
 
-**Themis enforces test-first development by an agent that is structurally prevented from seeing the implementation.** A fresh "blind writer" agent derives the acceptance tests from the spec *alone* — it cannot read your source, your examples, or any generated data. Those tests are hash-locked before a single line of implementation is written, a separate "blind runner" agent produces the verified green report, and a third "arbiter" agent rules on any dispute.
+## What it is
 
-The point is one specific failure mode: **the author–verifier collusion.** If the same agent (or human) that produces an artifact also writes — or signs off on — its check, the check inherits the author's misconception. The test passes, everyone agrees, and the thing is still wrong. Themis breaks that by making the verifier's independence a property of the *system*, not a matter of trust.
+When the same agent writes code and writes the tests that check the code, the tests are not an independent verdict. They pass against whatever the agent built, misreadings included. Themis breaks that by making the verifier's independence a property of the system rather than a matter of trust: the agent that derives the tests is structurally denied any view of the implementation, the tests are cryptographically sealed before any code exists, and a separate agent runs them.
 
-It only grounds what's **executably specifiable** — it is not a general knowledge-base validator. Within that scope, it's the part of the pipeline that can say "this code does what the spec says" without the author in the loop.
+## What it does and does not do
 
----
+Themis grounds only what is executably specifiable. Within that scope, it can establish that code does what a specification says without the author of the code in the loop.
 
-## Why this exists
+It does **not**:
 
-Most "AI writes the tests" setups quietly let the implementing agent see, edit, or regenerate its own tests. That makes the green light meaningless: a model under deadline pressure will reconcile a failing assertion by editing the assertion. Themis closes every door it found that path tries to use:
+- judge a spec's correctness, quality of design, or completeness (a vague or poorly thought-out spec can earn a confident pass on the wrong thing; the spec is the trust boundary)
+- verify declarative knowledge, prose, or design rationale (it is not a lie-detector for an agent's text)
+- guarantee a perfect wall (it is defense in depth; see [Limitations](#limitations))
 
-1. **Blindness at the hook level.** The blind writer runs under a Claude Code `PreToolUse` path guard that *denies reads* of `src/`, examples, and generated data. It sees only the task spec and a single `public_api.md`. (Enforced by the hook, regardless of the agent's permission mode.)
-2. **Hash-lock.** After the red phase, every test file is hashed. At the green phase the hashes are re-verified — any byte changed, the green fails. The implementer cannot edit the oracle to match a wrong build.
-3. **Coverage check.** Every `AC-N` acceptance criterion must have a tagged, passing test. No silent gaps.
-4. **Arbiter.** If the implementer thinks a test is genuinely wrong, they file a *challenge*. A fresh arbiter agent — which has seen neither the implementer's reasoning nor the writer's — rules upheld / rejected / ambiguous. Upheld deletes the test; ambiguous escalates to a human.
+It is **Claude Code-specific**: blindness is enforced through Claude Code `PreToolUse` / `PostToolUse` hooks and fresh-agent spawning. It is not a framework-agnostic library.
 
-## Does it actually hold? — adversarial evidence
+## How it works
 
-We pointed an [ImpossibleBench](https://arxiv.org/abs/2510.20270)-style methodology at our own gate: tasks whose acceptance criteria are **mutually unsatisfiable**, so *any* verified green is provably a cheat. Two arms on identical probes, run through the production `claude -p` spawner:
+The design is permissions. Each agent is granted exactly what it needs and denied the rest, enforced by tooling rather than by instruction.
 
-| Metric | Result |
-|---|---|
-| **ON-arm true-bypass rate (the gate)** | **0 / 42 (0%)** |
-| OFF-arm false-green, adversarial framing (no gate) | 2 / 21 (9.5%) |
-| OFF-arm false-green, realistic framing (no gate) | 0 / 21 (0%) |
-| Measurement losses | 0 |
+- **Blind writer** derives the acceptance tests from the spec and a single `public_api.md`. A hook denies it any read of the source, the examples, or generated data, so it cannot copy the implementation's behavior because it cannot see it.
+- **Implementer** writes code to pass those tests. It can see and change everything except the sealed tests. The wall here is honest about its limits: a path guard blocks the ordinary edit tools from rewriting a locked test, but it does not cover Bash, and a determined agent can rewrite a file through the shell. That gap is closed by the hash layer below.
+- **Blind runner** is spawned fresh, never having seen the implementer's reasoning. It re-verifies the seal, runs the tests, and checks that every acceptance criterion has a tagged passing test.
+- **Arbiter** appears only on a dispute. The implementer cannot delete a test it believes is wrong; it can only file a challenge, which a fresh arbiter (having seen neither the writer's nor the implementer's reasoning) rules on. Upheld removes the test; ambiguous escalates to a human.
 
-The gate drove a real, measured cheat rate to zero on tasks it is impossible to pass honestly. Two things we found that are worth your skepticism, both documented in full:
+### The seal (the load-bearing layer)
 
-- **The spawn mechanism is a first-order confound.** The same probes run through in-conversation subagents cheated **100%**; through fresh `claude -p` CLI agents, **9.5%** — a ~10× swing from *how the agent was spawned*, nothing to do with the gate. Any agent-behavior measurement that doesn't control for this is measuring its own harness.
-- **The hash layer is load-bearing, not redundant.** The path guard doesn't cover `Bash`; a Bash-capable adversary rewrote locked tests through the shell. Layer 2 (hash re-verification) caught every one. The path guard alone is *not* sufficient.
+Before any implementation exists, each test file is fingerprinted with a SHA-256 hash and the fingerprints are recorded. At the green phase the runner recomputes each fingerprint and compares it to the sealed one. A test changed by any route, shell included, no longer matches and fails the run regardless of whether it now passes. Adding or deleting a locked test also breaks the comparison.
 
-Full method, ledger, and limitations: **[docs/impossible-ac-results.md](docs/impossible-ac-results.md)**. Sample size is small (n=21/cell, wide CI on the 9.5%); read the limitations section before quoting a number.
-
-## Honest limitations
-
-- **Claude Code-specific.** Blindness is enforced by Claude Code `PreToolUse`/`PostToolUse` hooks and fresh-agent spawning (`claude -p` subscription, or the optional Agent SDK spawner). This is not a framework-agnostic library.
-- **Executably-specifiable only.** Themis grounds behavior you can write a test against. Declarative knowledge (docs, facts, design notes) is out of scope.
-- **Spec quality is the ceiling.** A blind writer can only test what the spec says. Garbage spec, garbage oracle — the `preflight` checks catch some of this (subjective language, missing observability) but not all.
-
-## How it fits together
+### Pipeline
 
 ```
 spec + public_api.md
-        │
-   ┌────▼─────┐   blind writer (Agent #1)        — path guard blocks src/, examples, generated data
-   │  RED     │   writes failing tests from spec → hash-lock
-   └────┬─────┘
-        │            implementer writes code (cannot edit locked tests)
-   ┌────▼─────┐   blind runner (Agent #2)         — re-verifies hashes, runs tests, checks AC coverage
-   │  GREEN   │   produces verified green report
-   └────┬─────┘
-        │            (optional) challenge → arbiter (Agent #3) rules upheld/rejected/ambiguous
-   ┌────▼─────┐
-   │  GATED   │
-   └──────────┘
+      |
+   [ RED ]    blind writer -> failing tests -> SHA-256 seal
+      |
+   implementer writes code (cannot edit sealed tests)
+      |
+   [ GREEN ]  blind runner -> re-verify seal -> run tests -> check AC coverage
+      |
+   (optional) challenge -> arbiter -> upheld / rejected / ambiguous
+      |
+   [ GATED ]
 ```
-
-| Component | File |
-|---|---|
-| Phase orchestrator (red/green/challenge) | `blind_tdd/orchestrator.py` |
-| Session contract (drives the hooks) | `blind_tdd/session.py` |
-| Path guard / bash guard / audit hooks | `templates/hooks/blind_tdd_*.py` |
-| Per-role agent settings | `templates/blind_tdd/settings.blind-*.json` |
-| Agent prompts (writer / runner / arbiter) | `templates/blind_tdd/prompts/` |
-| AC coverage verifier | `blind_tdd/coverage.py` |
-| Challenge / arbiter protocol | `blind_tdd/challenge.py` |
-| Spec preflight + task linter | `blind_tdd/preflight.py`, `blind_tdd/lint_tasks.py` |
-| Spawners (`claude -p`, Agent SDK) | `blind_tdd/spawners/` |
-| Impossible-AC probe harness | `blind_tdd/probes.py`, `blind_tdd/probe_driver.py` |
 
 ## Quickstart
 
 ```bash
 git clone <repo-url> themis && cd themis
-pip install -e ".[dev]"      # add ".[dev,sdk]" for the Agent-SDK spawner
+pip install -e ".[dev]"        # add ".[dev,sdk]" for the Agent SDK spawner
 
-# run the suite (272 tests)
-python -m pytest
+python -m pytest               # run the test suite
 
-# inspect the impossible-AC probe catalog and gate verdict
+# inspect the impossible-AC probe catalog and the gate verdict
 python -m blind_tdd.probes --list
-python -m blind_tdd.probes --gate --min-on-runs 20   # needs a probe ledger; see the results doc
+python -m blind_tdd.probes --gate --runs-file data/probe_runs.jsonl --min-on-runs 20
 ```
 
-To adopt the gate on your own project, start with **[docs/adoption-guide.md](docs/adoption-guide.md)**. The full design rationale and resolved open questions are in **[docs/rfc.md](docs/rfc.md)**.
+To adopt the gate on an existing project, start with [`docs/adoption-guide.md`](docs/adoption-guide.md). The design rationale is in [`docs/rfc.md`](docs/rfc.md).
+
+## Evidence
+
+Themis was tested against an [ImpossibleBench](https://arxiv.org/abs/2510.20270)-style probe set: coding tasks whose acceptance criteria are mutually contradictory, so that any verified pass is provably a cheat. On these tasks there is nothing but cheating to detect.
+
+| Condition | Result |
+|---|---|
+| Gate **on** — verified bypasses (all 42 runs, both framings) | **0 / 42** |
+| Gate **off** — false greens, adversarial framing | 2 / 21 (9.5%) |
+| Gate **off** — false greens, ordinary framing | 0 / 21 |
+| Measurement losses | 0 |
+
+The honest reading: the gate drove the bypass rate to zero where cheating was both possible and incentivized, and the no-gate arm only cheated under adversarial framing. The gate earns its keep under pressure, which is the realistic condition for a deployed agent, not the calm one.
+
+Two caveats belong next to those numbers, not in a footnote:
+
+- **Small sample.** n is 21 per cell; read [`docs/impossible-ac-results.md`](docs/impossible-ac-results.md) before quoting any figure.
+- **The spawn mechanism is a first-order confound.** Identical probes cheated ~100% through in-conversation subagents and ~9.5% through fresh `claude -p` agents, a roughly tenfold swing driven by how the agent was spawned. Every reported number uses the production spawner. Any agent-behavior measurement that does not control for this is partly measuring its own harness.
+
+## Limitations
+
+The full, honest list — including the spec-as-trust-boundary problem, the persistence of the hash baseline, the arbiter's input surface, and per-model staleness — is in [`docs/limitations.md`](docs/limitations.md). Read it before relying on the gate.
+
+## Prior art
+
+The principle is old: a checker cannot be independent of the thing it checks. It is the logic of clean-room software development (a separate team certifies code its authors never test) and separation of duties (whoever writes the check cannot sign it), and the general failure it guards against is reward hacking, or Goodhart's law. Themis applies those ideas to AI-written code, with the independence enforced as a permission rather than a policy. That last point is the distinction from the spec-driven-development tools that assign a verifier as a role the agent is asked to play, where the verifier can still read the implementation and the tests can still be edited after the fact.
 
 ## Provenance
 
-Themis is the standalone extraction of a blind-TDD gate built inside a larger cross-project agent-learning harness. It runs on top of **oh-my-claudecode** for agent orchestration and its `deep-interview` intake — the spec-crystallization step that feeds the gate its acceptance criteria. The blind gate itself (the hooks, hash-lock, arbiter, and impossible-AC probe harness) is original to this project.
+Themis is the standalone extraction of a blind-TDD gate built inside a larger agent-learning harness. The blind gate itself (the hooks, the hash seal, the arbiter, and the impossible-AC probe harness) is original to this project.
 
 ## License
 
-MIT © 2025–2026 Dan Schermele. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
