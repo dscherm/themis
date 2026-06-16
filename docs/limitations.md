@@ -21,6 +21,22 @@ language (`smoothly`, `properly`) is flagged — but it cannot judge whether the
 criteria describe the *right* behavior. Garbage spec, garbage oracle. Spec
 review remains a human responsibility upstream of the gate.
 
+## Test strength is not measured
+
+The gate enforces a test's *independence* (written without sight of the
+implementation) and its *integrity* (not edited afterward). It does **not** prove
+the test is *strong* — that it would actually fail a wrong implementation. A test
+can be independent, untampered, AC-tagged, and still too weak to catch a real bug
+(it might assert a return type but not the value).
+
+Measuring strength means perturbing the implementation and checking whether some
+test fails — **mutation testing** — which requires an agent that *can* read the
+code, the opposite of the blind writer. That is a separate, planned capability
+(`tools/mutate.py`, not yet built) plus an audit pass over `tests/mutation/` and
+`tests/audit/`, not part of the gate. So a green gate is **necessary but not
+sufficient** for correctness: it guarantees the code satisfies an independent,
+untampered test of every criterion — not that those tests are exhaustive.
+
 ## The hash seal assumes an intact baseline
 
 Layer 2 (the load-bearing defense) works by recomputing each test file's SHA-256
