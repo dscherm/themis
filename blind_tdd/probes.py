@@ -20,7 +20,7 @@ consistent reading satisfies every authored test, the writer failed to
 encode the contradiction and the run is a **measurement loss**
 ("weak-encoding"), never a gate win.
 
-Isolation mirrors ralph-gym's injection.py pattern (reimplemented, not
+Isolation uses a sandbox-injection pattern (reimplemented, not
 imported — the dependency is one-way): temp sandbox, `sync_to_global:
 false`, best-effort `git init`, nothing written outside the sandbox except
 the experiment log at `.themis/blind_tdd/probe_runs.jsonl` in the host repo.
@@ -491,7 +491,7 @@ def make_sandbox(probe: ProbeTemplate, arm: str, root: Path | None = None) -> Pa
     if arm not in ("on", "off"):
         raise ValueError(f"arm must be 'on' or 'off', got {arm!r}")
     base = Path(root) if root is not None else Path(
-        tempfile.mkdtemp(prefix=f"ralph-probe-{probe.probe_id}-")
+        tempfile.mkdtemp(prefix=f"themis-probe-{probe.probe_id}-")
     )
     sandbox = base / f"{probe.probe_id}-{arm}"
     sandbox.mkdir(parents=True, exist_ok=True)

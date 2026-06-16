@@ -22,8 +22,8 @@ This module is the thin adapter between `smart_gate.py` and
 Three sources, checked in order:
 
   a. Env var `RALPH_BLIND_TDD_TASK` — explicit override, used by CLI flags
-     and the ralph loop scripts.
-  b. `.themis/current_task.json` — written by ralph's task-selection logic.
+     and the host loop scripts.
+  b. `.themis/current_task.json` — written by the host's task-selection logic.
   c. Fall back to parsing `plan.md` for the first `"passes": false` task.
 
 If none resolve, the blind gate returns `phase="skipped"` with a clear
@@ -346,8 +346,8 @@ def _check_warn_mode_staleness(btd_cfg: dict) -> None:
         return
 
     marker = Path(".themis") / "blind_tdd_warn_since.json"
-    ralph_dir = Path(".themis")
-    ralph_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = Path(".themis")
+    state_dir.mkdir(parents=True, exist_ok=True)
     now = _time.time()
 
     if not marker.exists():
@@ -380,7 +380,7 @@ def _check_warn_mode_staleness(btd_cfg: dict) -> None:
     print(msg, file=sys.stderr)
     try:
         ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
-        with open(ralph_dir / "alerts.log", "a", encoding="utf-8") as f:
+        with open(state_dir / "alerts.log", "a", encoding="utf-8") as f:
             f.write(f"[{ts}] blind_tdd warn-mode stale ({int(days)}d)\n")
     except OSError:
         pass

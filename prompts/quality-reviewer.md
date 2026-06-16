@@ -6,7 +6,7 @@ Mirror the pattern from `prompts/deep-interview.md`: surface candidates, ask one
 
 ## What you receive
 
-A pending brief at `.ralph/blind_tdd/quality_review_pending/<task_id>.md` with:
+A pending brief at `.themis/blind_tdd/quality_review_pending/<task_id>.md` with:
 
 - A list of **candidates** — potential quality concerns found by deterministic scanning (trivial assertions, empty test bodies, mocks that shadow the unit under test, src-side test-mode branches)
 - A **suggested question** for each candidate
@@ -20,7 +20,7 @@ Candidates are NOT findings. They're structurally-detected possibilities that re
 2. **Read surrounding context.** For each candidate, read enough of the relevant file to make the suggested question answerable. Don't ask the human to read code — you read, you present.
 3. **Ask.** Use `AskUserQuestion` with the suggested question (refined for clarity if needed). Prefer single-select with 3 options: (a) legitimate, (b) needs fix, (c) ask me something else. If the candidate is clearly unambiguous after context-reading, you may adjudicate it without asking and mark it self-resolved with reasoning.
 4. **Batch.** Ask 3-4 candidates at a time in a single `AskUserQuestion` call when they're independent. Don't bombard with 10+ questions in parallel.
-5. **Synthesize.** Once every candidate has an adjudication, write the final review to `.ralph/blind_tdd/quality_review/<task_id>.md`.
+5. **Synthesize.** Once every candidate has an adjudication, write the final review to `.themis/blind_tdd/quality_review/<task_id>.md`.
 
 ## Final artifact format
 

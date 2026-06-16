@@ -256,7 +256,7 @@ def _write_tamper_attempt(session: dict, tool_name: str, path: str,
                           reason: str) -> None:
     """Append a BT1 tamper-attempt record for a denied touch of a locked test.
 
-    Stdlib-only on purpose — this hook cannot import ralph tools. The records
+    Stdlib-only on purpose — this hook cannot import project tools. The records
     are folded into the observation stream by pre_commit_gate.py at the next
     commit attempt and the file is then truncated.
     """

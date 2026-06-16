@@ -307,7 +307,7 @@ The gate fails under strict enforcement. If the implementer believes a specific 
 
 ## Naming
 
-The preferred identifiers are `THEMIS_TASK`, `THEMIS_HOME`, and the `themis_home` config key / constructor parameter. Themis was extracted from a harness named `ralph-universal`, so the original names are still honored as **silent legacy aliases** — you don't need to change anything if you were already using them:
+The preferred identifiers are `THEMIS_TASK`, `THEMIS_HOME`, and the `themis_home` config key / constructor parameter. Themis was extracted from a larger agent-learning harness, so the original names it used are still honored as **silent legacy aliases** — you don't need to change anything if you were already using them:
 
 | Preferred | Legacy alias (still works) |
 |---|---|

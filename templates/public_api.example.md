@@ -1,6 +1,6 @@
-# unpossible-ralph — Public API Surface
+# Public API Surface (example)
 
-Purpose: this file is the **only** reference a blind-TDD test writer may consult beyond the task spec. It lists the public callable surface of Ralph's core tools so writers can author contract tests without seeing implementation. Update this file when you add, rename, or remove a public function.
+Purpose: this file is the **only** reference a blind-TDD test writer may consult beyond the task spec. It lists the public callable surface of the project's core tools so writers can author contract tests without seeing implementation. Update this file when you add, rename, or remove a public function.
 
 Non-goals: this is not exhaustive documentation, not a design document, and not a tutorial. See `README.md` for those.
 
@@ -17,7 +17,7 @@ Non-goals: this is not exhaustive documentation, not a design document, and not 
 ```python
 def main(argv: list[str] | None = None) -> int: ...
 # CLI flags: --diagnose, --write-feedback, (default) full gate run.
-# Returns 0 on pass, non-zero on fail. Writes .ralph/last_gate_result.json.
+# Returns 0 on pass, non-zero on fail. Writes .themis/last_gate_result.json.
 ```
 
 `ObservationCollector` — records gate checks. Public methods:
@@ -32,7 +32,7 @@ class ObservationCollector:
 ```python
 def main() -> int: ...
 # PreToolUse hook entry. Exit 0 = proceed, 2 = block commit.
-# Opt-in via harness.pre_commit_gate in ralph.config.json.
+# Opt-in via harness.pre_commit_gate in themis.config.json.
 ```
 
 ## `tools/observe.py`
@@ -98,7 +98,7 @@ def validate_task(task: dict) -> ValidationResult: ...
 Impossible-AC probe harness: drives deliberately-unsatisfiable probe tasks
 through the real blind gate in an isolated sandbox (ON arm) or a plain
 unguarded scaffold (OFF arm), classifies each run, and appends paired
-records to `.ralph/blind_tdd/probe_runs.jsonl`.
+records to `.themis/blind_tdd/probe_runs.jsonl`.
 
 CLI: `python -m tools.blind_tdd.probes --list | --report | --gate [--min-on-runs N] [--runs-file PATH]`
 
@@ -154,10 +154,10 @@ class ProbeRunRecord:
     timestamp: str             # ISO-8601 UTC
     details: dict
     def to_dict(self) -> dict: ...
-# `.ralph/blind_tdd/probe_runs.jsonl` schema: one to_dict() object per line.
+# `.themis/blind_tdd/probe_runs.jsonl` schema: one to_dict() object per line.
 
 def make_sandbox(probe: ProbeTemplate, arm: str, root: Path | None = None) -> Path: ...
-# Isolated directory (injection.py pattern): writes ralph.config.json with
+# Isolated directory (injection.py pattern): writes themis.config.json with
 # observations.sync_to_global=false and gate.blind_tdd.enabled=(arm == "on"),
 # plan.md containing only the probe task, public_api.md from the template,
 # empty test dirs, best-effort `git init`. Never writes outside the returned
@@ -170,12 +170,12 @@ def classify_run(
     encoding: EncodingCheckResult,
 ) -> ProbeRunRecord: ...
 # Pure artifact reader — no agents, no gate invocation. Classifies from the
-# sandbox's .ralph/blind_tdd/{red_state,green_report,challenges,rulings,
-# challenge_log.jsonl,tamper_attempts.jsonl} and .ralph/human_requests/.
+# sandbox's .themis/blind_tdd/{red_state,green_report,challenges,rulings,
+# challenge_log.jsonl,tamper_attempts.jsonl} and .themis/human_requests/.
 # Outcome precedence: false-green > escalated > challenge-filed > honest-red.
 
 def append_probe_run(record: ProbeRunRecord, path: str | Path | None = None) -> Path: ...
-# Appends one JSONL line; default path .ralph/blind_tdd/probe_runs.jsonl
+# Appends one JSONL line; default path .themis/blind_tdd/probe_runs.jsonl
 # (host repo — the experiment log, NOT inside any sandbox). Returns the path.
 
 def load_probe_runs(path: str | Path | None = None) -> list[dict]: ...
@@ -229,7 +229,7 @@ def matches_tags(
 
 ```python
 def main() -> int: ...
-# CLI: --auto, --force. Writes ralph.config.json, installs .claude hooks.
+# CLI: --auto, --force. Writes themis.config.json, installs .claude hooks.
 ```
 
 ---

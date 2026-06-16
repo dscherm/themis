@@ -7,16 +7,15 @@ tests).
 **Author:** Dan Schermele + Claude
 
 > **Provenance & vocabulary.** This RFC was written while the gate lived inside a
-> larger cross-project agent-learning harness — named `ralph-universal` where the
-> text below refers to it directly — and Themis is its standalone extraction. The
-> text therefore refers to that original integration by name. Read these as the
-> *reference integration*, not as requirements:
+> larger cross-project agent-learning harness; Themis is its standalone
+> extraction. The text below refers to that original integration by the names it
+> used internally. Read these as the *reference integration*, not as requirements:
 >
 > - `smart_gate` — the host's per-commit gate that the blind gate plugged into
 >   (as "step 2c"). Standalone, the equivalent entry point is your own CI step.
 > - `plan.md` / `current_task.json` — the host's task source (acceptance
 >   criteria + public surface per task).
-> - `.ralph/` — the host state directory; in Themis this is `.themis/`.
+> - `.themis/` — the gate's state directory.
 >
 > The gate's core — blind writer → hash-lock → blind runner → arbiter — is
 > independent of all of these. The commit-by-commit build history lives in git.
@@ -28,7 +27,7 @@ tests).
 - **Gate ordering.** In the reference integration the blind gate runs after
   secrets/syntax checks but before the test suite, so a schema failure never
   wastes test time.
-- **Task resolution.** `RALPH_BLIND_TDD_TASK` env → `current_task.json` → first
+- **Task resolution.** `THEMIS_TASK` env → `current_task.json` → first
   `passes:false` task in `plan.md`. If none resolve, the gate returns
   `phase="skipped"` so doc-only commits aren't blocked.
 - **Red-state persistence.** Test-file hashes + the triage report are held
@@ -41,7 +40,7 @@ tests).
 
 ## Problem statement
 
-Today's `smart_gate.py` in ralph-universal has a structural integrity problem that became visible on the unity-py-sim dashboard:
+Today's `smart_gate.py` in the harness has a structural integrity problem that became visible on the unity-py-sim dashboard:
 
 - **Last 500 observations: 464 gate=pass, 2 gate=fail (100% gate pass rate).**
 - **Of those 500, only 2 had tests actually run.** Both failed.
@@ -56,7 +55,7 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 1. **Enforce TDD ordering**: tests come first, implementation second. No exceptions.
 2. **Enforce blindness**: the test-writing agent cannot see the implementation or be influenced by it.
 3. **Enforce spec discipline**: every task must carry enough acceptance criteria and public-API shape that an outsider with no code access can write meaningful tests.
-4. **Work across languages**: Python, JavaScript, TypeScript, C#, and anything else ralph-universal supports. No framework lock-in.
+4. **Work across languages**: Python, JavaScript, TypeScript, C#, and anything else the harness supports. No framework lock-in.
 5. **Support human-in-the-loop for untestable cases**: when a criterion is genuinely subjective or requires visual verification, route to a human via a structured channel instead of writing a bad test.
 6. **Preserve git cleanliness**: `git bisect` must work. One commit per task.
 7. **Produce cross-project learning signals**: every blind-TDD event becomes an observation that feeds the existing dashboard and lessons system.
@@ -81,15 +80,15 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 | R1.2 | "Source files" MUST include `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.cs`, `.json`, `.yaml`, `.yml`, `.go`, `.rs`, `.java`, `.kt`, `.rb`, plus project-specific extensions via `gate.source_extensions` config. |
 | R1.3 | When the test map does not cover a changed runnable file, the gate MUST fall back to running the full test suite (not silently skip). |
 | R1.4 | When a non-runnable source file (e.g. `.cs`, `.json`) changes, the gate MUST flag it as advisory by default; `gate.strict_nonrunnable = true` escalates to human check-in. |
-| R1.5 | Ignorable paths MUST include `tools/`, `.ralph/`, `docs/`, `.github/`, `data/reference/`, `data/assets/`. |
+| R1.5 | Ignorable paths MUST include `tools/`, `.themis/`, `docs/`, `.github/`, `data/reference/`, `data/assets/`. |
 
-**Status:** Implemented in Track 1 (commit on `ralph-universal/master`).
+**Status:** Implemented in Track 1 (commit on `the harness's main branch`).
 
 ### R2. Human input channel (prerequisite — Track 2)
 
 | ID | Requirement |
 |----|-------------|
-| R2.1 | A file-based drop box MUST exist at `.ralph/human_requests/` for any tool or agent to write structured JSON requests. |
+| R2.1 | A file-based drop box MUST exist at `.themis/human_requests/` for any tool or agent to write structured JSON requests. |
 | R2.2 | Request files MUST follow a standard schema (see Appendix A) including: id, task, agent, phase, criterion, category, question, options, free_text_allowed, blocking, timeout_seconds, created_at. |
 | R2.3 | Response files MUST follow a standard schema (see Appendix A) including: request_id, chosen_option, free_text, responded_at, responder. |
 | R2.4 | Claude (in the main conversation) MUST act as a **verbatim router**: when a new request file appears, Claude displays the `question` and `options` fields verbatim to the user, captures the user's next message verbatim, and writes it to the response file. Claude MUST NOT rephrase, summarize, interpret, or add commentary. |
@@ -109,7 +108,7 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 | R3.4 | Agent #2 MAY read: the task spec, acceptance criteria, test files written by Agent #1, `public_api.md`, and test runner output. Agent #2 MUST NOT read any file in `src/` or `examples/`. |
 | R3.5 | The blind arbiter agent (**Agent #3**) MUST NOT read: implementation, other tests, git history, or comments outside the disputed test. |
 | R3.6 | Agent #3 MAY read: the task spec, `public_api.md`, the specific disputed test, and the challenge text. |
-| R3.7 | Enforcement MUST use the **three-layer defense** resolved in OQ1: (1) a PreToolUse hook rejects forbidden-path Read/Grep/Glob/Edit/Write calls before execution, (2) the Agent SDK's `tools=[...]` whitelist removes Bash from Agent #1 and restricts Agent #2's Bash to test-runner commands only, (3) a PostToolUse hook logs every tool call to `.ralph/blind_audit/` for forensic verification. |
+| R3.7 | Enforcement MUST use the **three-layer defense** resolved in OQ1: (1) a PreToolUse hook rejects forbidden-path Read/Grep/Glob/Edit/Write calls before execution, (2) the Agent SDK's `tools=[...]` whitelist removes Bash from Agent #1 and restricts Agent #2's Bash to test-runner commands only, (3) a PostToolUse hook logs every tool call to `.themis/blind_audit/` for forensic verification. |
 | R3.8 | The audit log MUST be recorded in the observation for the task. Any preflight rejection counts as a violation attempt and is logged with the agent ID, attempted path, and timestamp. |
 | R3.9 | Accidental violations (e.g. agent attempts to read `src/` but is blocked) MUST NOT fail the gate on their own. Successful reads of forbidden paths (if the wrapper fails) MUST fail the gate. |
 | R3.10 | Agent #2's test execution MAY import implementation modules at runtime (via pytest/jest/etc.). Tracebacks that reveal source lines are visible by default (not redacted). |
@@ -184,7 +183,7 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 | ID | Requirement |
 |----|-------------|
 | R10.1 | Each task MUST result in **exactly one git commit** containing both the tests and the implementation. |
-| R10.2 | The red phase, green phase, challenge events, and arbiter rulings MUST be recorded as observations in `.ralph/observations.jsonl`, not as git commits. |
+| R10.2 | The red phase, green phase, challenge events, and arbiter rulings MUST be recorded as observations in `.themis/observations.jsonl`, not as git commits. |
 | R10.3 | `git bisect` MUST work cleanly: every commit on the branch passes all tests. No broken-main states from the red/green trajectory. |
 | R10.4 | The observation log provides the full TDD trajectory audit trail for any task. Querying observations by task id MUST yield the red → implementation → green sequence with timestamps. |
 
@@ -202,7 +201,7 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 
 | ID | Requirement |
 |----|-------------|
-| R12.1 | All blind-TDD config lives under `gate.blind_tdd.*` in the project's ralph config. |
+| R12.1 | All blind-TDD config lives under `gate.blind_tdd.*` in the project's the gate config. |
 | R12.2 | `gate.blind_tdd.enabled` (bool, default false) controls opt-in. |
 | R12.3 | `gate.blind_tdd.enforcement` (enum: `honor` / `audit` / `preflight`, default `preflight`) controls blindness enforcement strictness. |
 | R12.4 | `gate.blind_tdd.max_challenges_per_task` (int, default 2). |
@@ -217,14 +216,14 @@ Track 3 (this RFC) goes further: it adds a **blind TDD/BDD enforcement layer** t
 | ID | Requirement |
 |----|-------------|
 | R13.1 | New observation types: `blind_red_phase`, `blind_green_phase`, `challenge_filed`, `arbiter_ruling`, `triage_escalation`, `blindness_violation_attempt`, `human_input_requested`, `human_input_resolved`. |
-| R13.2 | All new observation types MUST include: task id, phase, agent id, timestamp, and the existing ralph-universal observation fields (project, iteration, gate result, tags). |
+| R13.2 | All new observation types MUST include: task id, phase, agent id, timestamp, and the existing the harness observation fields (project, iteration, gate result, tags). |
 | R13.3 | Observations MUST be queryable from the dashboard to produce metrics: blind-TDD pass rate, challenge frequency, arbiter upheld/rejected ratios, triage category histogram, human-intervention rate. |
 
 ### R14. Migration and rollout
 
 | ID | Requirement |
 |----|-------------|
-| R14.1 | When `gate.blind_tdd.enabled = false`, behavior MUST be identical to current ralph-universal (no new phases, no new spawns). |
+| R14.1 | When `gate.blind_tdd.enabled = false`, behavior MUST be identical to the current harness (no new phases, no new spawns). |
 | R14.2 | When enabled on a project for the first time, existing tasks without `acceptance_criteria` MUST be grandfathered: the schema validator warns but does not block. New tasks MUST have the fields. |
 | R14.3 | unity-py-sim is the first intended adopter. Migration guide must document the opt-in sequence. |
 | R14.4 | Opt-in MUST be reversible: disabling the flag returns the project to standard smart_gate behavior without data loss. |
@@ -339,7 +338,7 @@ The blindness enforcement mechanism is a wrapper around the claude-code tool lay
 | 7 | Agent architecture | Two separate agents (Agent #1 writer, Agent #2 runner) |
 | 8 | Enforcement | Log-audit with whitelist + preflight rejection; tracebacks visible |
 | 9 | Challenge resolution | Formal challenge → fresh arbiter agent → upheld/rejected/ambiguous; cap configurable per-project |
-| 10 | Human input channel | File-based drop box at `.ralph/human_requests/`; Claude is verbatim router |
+| 10 | Human input channel | File-based drop box at `.themis/human_requests/`; Claude is verbatim router |
 | 11 | Tasks needing human interaction | Handled by discernment + triage categories in R5 |
 | 12 | Existing post-task validation agent | Keep, narrow scope to mutation/audit testing |
 | 13 | BDD framework | Loose Gherkin, no framework dependency |
@@ -414,7 +413,7 @@ Agent #2's Read/Grep/Glob are still guarded by the Layer 1 hook; the Bash whitel
 
 **Layer 3 — PostToolUse audit log (forensic proof)**
 
-Every tool call by any blind agent is logged to `.ralph/blind_audit/<task>-<agent>.jsonl` via a PostToolUse hook. This produces:
+Every tool call by any blind agent is logged to `.themis/blind_audit/<task>-<agent>.jsonl` via a PostToolUse hook. This produces:
 - Evidence for the observation record (R3.8)
 - Post-hoc verification that Layer 1 actually blocked attempts
 - Cross-project data for detecting patterns (e.g. "Agent #1 for task type X attempts src/ reads 60% of the time")
@@ -432,7 +431,7 @@ If Layer 1 ever fails (hook script bug, settings misconfiguration), the audit lo
 
 - Path scoping in subagent `allowed_tools` → use Layer 1 hook
 - Agent frontmatter `restrict_paths` field → use Layer 1 hook
-- Managed cross-project path restrictions → use project-level hooks that ralph-universal ships as a template
+- Managed cross-project path restrictions → use project-level hooks that the harness ships as a template
 
 **Sources**
 
@@ -443,8 +442,8 @@ If Layer 1 ever fails (hook script bug, settings misconfiguration), the audit lo
 
 **Action items derived from this resolution**
 
-1. Ship a reference `blind-tdd-path-guard.sh` hook script in `ralph-universal/templates/hooks/`
-2. Ship a reference `settings.blind-tdd.json` config in `ralph-universal/templates/`
+1. Ship a reference `blind-tdd-path-guard.sh` hook script in `templates/hooks/`
+2. Ship a reference `settings.blind-tdd.json` config in `templates/`
 3. Update R3.7 wording from "log-audit with preflight rejection" to "three-layer defense (PreToolUse hook + subagent tool scoping + PostToolUse audit)"
 4. Add a bootstrap step for blind-TDD adoption that copies the hook and settings into the project
 
@@ -458,7 +457,7 @@ If Layer 1 ever fails (hook script bug, settings misconfiguration), the audit lo
 
 ### OQ3. What language-specific runners does Agent #2 need?
 
-**Risk level: MEDIUM.** Agent #2 has to run tests via the project's configured runner (pytest for Python, jest/vitest for JS, dotnet test for C#, cargo test for Rust, etc.). The existing ralph config has a `stack.test_runner` map. Agent #2 should reuse that, not invent its own.
+**Risk level: MEDIUM.** Agent #2 has to run tests via the project's configured runner (pytest for Python, jest/vitest for JS, dotnet test for C#, cargo test for Rust, etc.). The existing the gate config has a `stack.test_runner` map. Agent #2 should reuse that, not invent its own.
 
 **Action:** Agent #2's spawn template reads `stack.test_runner` and constructs the appropriate command. Failures in unknown runners escalate to human.
 
@@ -486,14 +485,14 @@ If Layer 1 ever fails (hook script bug, settings misconfiguration), the audit lo
 ## Build order (unchanged from 2026-04-10 discussion)
 
 ### Track 1 — smart_gate fixes
-**Status: COMPLETE (committed to `ralph-universal/master`).**
+**Status: COMPLETE (committed to `the harness's main branch`).**
 
 ### Track 2 — human input channel infrastructure
 **Status: COMPLETE (part of Track 1, `tools/human_input.py`). Dashboard surfacing deferred to Track 4.**
 
 ### Track 3 — blind-TDD gate (THIS RFC)
 
-Estimated 1,500-2,000 LOC in `ralph-universal/tools/` plus schema changes and migration docs.
+Estimated 1,500-2,000 LOC in `the harness's tools/` plus schema changes and migration docs.
 
 Components:
 1. **Schema validator for plan.md** — rejects tasks missing `acceptance_criteria` or `public_surface`
@@ -502,7 +501,7 @@ Components:
 4. **Tool wrapper** — the preflight rejection mechanism (depends on OQ1 resolution)
 5. **Observation schema extensions** — new record types in `observe.py`
 6. **`public_api.md` format spec and first-project example**
-7. **Ralph config shape** — new `gate.blind_tdd.*` keys
+7. **Gate config shape** — new `gate.blind_tdd.*` keys
 8. **Coverage verifier** — cross-references criterion IDs against test annotations
 9. **Challenge protocol orchestration** — tracks cap, spawns arbiter, routes rulings
 10. **Migration guide** — step-by-step opt-in for a project
@@ -739,7 +738,7 @@ The orchestrator currently only supports `ManualSpawner`, which writes briefs to
 - Hooks are configured via the SDK's hooks option instead of `.claude/settings.local.json`.
 - Returns when the SDK's result stream completes.
 
-**Estimated effort:** ~200 lines, 1-2 hours. Lower priority than A1 because ralph runs interactively today.
+**Estimated effort:** ~200 lines, 1-2 hours. Lower priority than A1 because the harness runs interactively today.
 
 #### A3. Wire `BlindTddOrchestrator` into `smart_gate.py`
 
@@ -748,9 +747,9 @@ The orchestrator currently only supports `ManualSpawner`, which writes briefs to
 **Key implementation details:**
 - Add config parsing: `gate.blind_tdd.enabled`, `gate.blind_tdd.enforcement`, `gate.blind_tdd.test_dirs`, `gate.blind_tdd.max_challenges_per_task`, `gate.blind_tdd.max_challenges_per_criterion`, `gate.blind_tdd.human_input_timeout`, `gate.blind_tdd.public_api_file`.
 - In `smart_gate.main()`, after the denylist/secrets/syntax checks but before tests, call `BlindTddOrchestrator.run_red_phase(task)` if enabled.
-- The blind gate runs per-TASK, not per-COMMIT. Smart gate is per-commit. This means we need a way to identify "the current task" — read from `.ralph/current_task.json` or parse from `plan.md` based on which task is marked in-progress.
+- The blind gate runs per-TASK, not per-COMMIT. Smart gate is per-commit. This means we need a way to identify "the current task" — read from `.themis/current_task.json` or parse from `plan.md` based on which task is marked in-progress.
 - If red phase fails, gate fails and caller goes back to the implementing agent with the red-phase reason.
-- Between red and green phases, the smart_gate flow hands control back to ralph for the implementing agent to code.
+- Between red and green phases, the smart_gate flow hands control back to the host for the implementing agent to code.
 - On the next gate run (after implementation), detect that a red phase record exists for the current task and proceed to green phase instead of re-running red.
 - Green phase result folds into the existing `collector.record_check()` flow as a new "blind_tdd" check.
 
@@ -758,7 +757,7 @@ The orchestrator currently only supports `ManualSpawner`, which writes briefs to
 
 **Open question:** how does `smart_gate.py` know which task is currently being worked on? Options:
 - (a) Parse `plan.md` for the first `"passes": false` task (fragile — multiple in-progress tasks break this)
-- (b) Track current task in `.ralph/current_task.json` updated by ralph's task-selection logic
+- (b) Track current task in `.themis/current_task.json` updated by the host's task-selection logic
 - (c) Require the caller to pass `--task <id>` explicitly
 - I'd recommend (b) with (c) as override — cleanest and most flexible.
 
@@ -771,8 +770,8 @@ Lowest frequency, can wait until Phase A is validated end-to-end.
 **Goal:** Orchestrate the challenge → arbiter → ruling → resolution flow.
 
 **Key implementation details:**
-- `file_challenge(task_id, test_file, test_name, criterion, argument, proposed_fix)` writes `.ralph/blind_tdd/challenges/<challenge_id>.json`
-- `spawn_arbiter(challenge_id)` reads the challenge, spawns Agent #3 via the arbiter settings, waits for `.ralph/blind_tdd/rulings/<challenge_id>.json`
+- `file_challenge(task_id, test_file, test_name, criterion, argument, proposed_fix)` writes `.themis/blind_tdd/challenges/<challenge_id>.json`
+- `spawn_arbiter(challenge_id)` reads the challenge, spawns Agent #3 via the arbiter settings, waits for `.themis/blind_tdd/rulings/<challenge_id>.json`
 - `apply_ruling(challenge_id, ruling)` routes:
   - `upheld` → delete the disputed test file, route criterion back to a fresh Agent #1 with the arbiter's reasoning as additional context
   - `rejected` → log and tell the implementing agent to make the test pass
@@ -829,9 +828,9 @@ Add to `tools/observe.py` (or a new `tools/lesson_extractor.py`):
 
 ### Phase D — CLAUDE.md mandate update
 
-#### D1. Update ralph-universal CLAUDE.md
+#### D1. Update the harness's top-level guide
 
-- Document the blind-TDD workflow at the top level so it applies to all ralph projects
+- Document the blind-TDD workflow at the top level so it applies to all enrolled projects
 - Reference this RFC for the full spec
 - Explicitly scope the existing post-task validation agent to `tests/mutation/` and `tests/audit/` (per R11)
 - Add a checklist of what a project needs to do to adopt blind-TDD (copy hooks, settings, add `public_api.md`, add `acceptance_criteria` + `public_surface` to tasks, set `gate.blind_tdd.enabled = true`)
@@ -847,7 +846,7 @@ Step-by-step guide for opting a project in:
 1. Copy `templates/hooks/blind_tdd_path_guard.py` and `blind_tdd_audit.py` to the project's `.claude/hooks/`
 2. Copy the appropriate settings template to `.claude/settings.local.json` (or set up per-agent settings via the SDK)
 3. Create `public_api.md` at the project root with the current public surface
-4. Add `gate.blind_tdd.enabled = true` to the project's ralph config
+4. Add `gate.blind_tdd.enabled = true` to the project's the gate config
 5. Update any in-progress task in `plan.md` to include `acceptance_criteria` and `public_surface` fields
 6. Run `smart_gate.py` — the blind gate should engage on the next task
 
@@ -857,9 +856,9 @@ Step-by-step guide for opting a project in:
 
 - Write `public_api.md` for unity-py-sim listing the current public surface of `src/engine/`
 - Pick a concrete near-term task (e.g. a translator fix or a new engine API) and add `acceptance_criteria` + `public_surface` fields to it
-- Enable `gate.blind_tdd.enabled = true` in `unity-py-sim/ralph.config.json`
+- Enable `gate.blind_tdd.enabled = true` in `unity-py-sim/themis.config.json`
 - Run the pipeline end-to-end
-- Log any friction as observations and fix in ralph-universal
+- Log any friction as observations and fix in the harness
 
 **Estimated effort:** 2-4 hours depending on how much friction appears.
 

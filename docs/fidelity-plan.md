@@ -3,7 +3,7 @@
 **Status:** Drafted 2026-04-10. Decisions locked, not yet implemented.
 **Follow-on to:** `blind-tdd-gate-rfc.md` (functionally complete as of `c3c95f0`)
 
-This plan covers three additive improvements to the blind-TDD gate's *input fidelity* — the quality of the task specs that feed the pipeline. None of these are on the original RFC's remaining-work list; they emerged from an in-session conversation about how to improve Ralph protocol adherence by tightening the front door rather than the back door.
+This plan covers three additive improvements to the blind-TDD gate's *input fidelity* — the quality of the task specs that feed the pipeline. None of these are on the original RFC's remaining-work list; they emerged from an in-session conversation about how to improve protocol adherence by tightening the front door rather than the back door.
 
 ## Locked decisions (user)
 
@@ -102,7 +102,7 @@ Should tasks declare `needs_human` criteria upfront in the task spec (new field 
 1. **Criterion ID gaps** — a task with `AC-1`, `AC-2`, `AC-4` (skipping `AC-3`) is probably a copy-paste error. Warn.
 2. **Duplicate task IDs** — currently not validated by schema_validator, trivial to add at linter level.
 3. **`public_surface.adds` conflicts with `modifies`** — the same signature in both → inconsistent, warn.
-4. **Stale `passes: true` with `acceptance_criteria`** — a completed task with criteria that were never validated through the blind gate (no `blind_green_phase` observation with the task id). Warn with "this task completed without blind-TDD validation." Gated on `--include-historical` CLI flag OR a `gate.blind_tdd.lint_warn_on_historical = true` config flag, since a fresh clone with no `.ralph/observations.jsonl` would otherwise flood with false positives.
+4. **Stale `passes: true` with `acceptance_criteria`** — a completed task with criteria that were never validated through the blind gate (no `blind_green_phase` observation with the task id). Warn with "this task completed without blind-TDD validation." Gated on `--include-historical` CLI flag OR a `gate.blind_tdd.lint_warn_on_historical = true` config flag, since a fresh clone with no `.themis/observations.jsonl` would otherwise flood with false positives.
 
 ### Files touched
 
@@ -214,7 +214,7 @@ def test_delta_angle_all_rotations(current, target, expected):
 
 - **Agent judgment drift** — blind writer interpreting a clear criterion in an unexpected way. That's what the challenge protocol (already shipped) is for.
 - **Project-level scope errors** — deciding what belongs in a task. No spec format helps; that's a design conversation.
-- **Free-text task descriptions** — Ralph still reads task descriptions as free text. These additions only tighten the structured fields (`acceptance_criteria`, `public_surface`). The description field remains advisory.
+- **Free-text task descriptions** — The harness still reads task descriptions as free text. These additions only tighten the structured fields (`acceptance_criteria`, `public_surface`). The description field remains advisory.
 - **Cross-project coordination** — if two projects define `AC-1` with different semantics, these checks don't notice. The lesson_extractor's `spec-unclear-phrasing` pattern covers the observed-drift case.
 
 ## Estimated total effort

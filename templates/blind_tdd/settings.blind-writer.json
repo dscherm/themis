@@ -1,5 +1,5 @@
 {
-  "_comment": "Settings for Blind TDD Agent #1 (test writer). No Bash tool. Read/Grep/Glob/Edit/Write guarded by PreToolUse hook against .ralph/blind_tdd/active_session.json. All tool calls audited via PostToolUse hook.",
+  "_comment": "Settings for Blind TDD Agent #1 (test writer). No Bash tool. Read/Grep/Glob/Edit/Write guarded by PreToolUse hook against .themis/blind_tdd/active_session.json. All tool calls audited via PostToolUse hook.",
   "permissions": {
     "allow": [
       "Read",
