@@ -76,6 +76,17 @@ python -m blind_tdd.probes --gate --runs-file data/probe_runs.jsonl --min-on-run
 
 To adopt the gate on an existing project, start with [`docs/adoption-guide.md`](docs/adoption-guide.md). The design rationale is in [`docs/rfc.md`](docs/rfc.md).
 
+## Claude Code plugin
+
+The blindness layer ships as an installable Claude Code plugin in [`plugin/blind-tdd/`](plugin/blind-tdd/):
+
+```
+/plugin marketplace add dscherm/themis
+/plugin install blind-tdd@themis
+```
+
+The plugin provides the enforcement surface — the `PreToolUse` path/bash guards, the `PostToolUse` audit, and the writer/runner/arbiter agent definitions, auto-activating passthrough-by-default. This package is the orchestration engine it drives (install it with `pip install themis-blind-tdd`). See the [plugin README](plugin/blind-tdd/README.md) for a 60-second quickstart and a recorded demo.
+
 ## Evidence
 
 Themis was tested against an [ImpossibleBench](https://arxiv.org/abs/2510.20270)-style probe set: coding tasks whose acceptance criteria are mutually contradictory, so that any verified pass is provably a cheat. On these tasks there is nothing but cheating to detect.

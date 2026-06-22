@@ -1,0 +1,4 @@
+# The blind-TDD orchestration engine is the standalone Themis package.
+# It is consumed via pip, never vendored into this plugin.
+# Repo: https://github.com/dscherm/themis
+themis-blind-tdd @ git+https://github.com/dscherm/themis.git

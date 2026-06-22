@@ -1,0 +1,36 @@
+{
+  "description": "Blind-TDD plugin hooks. Auto-discovered on install; passthrough-by-default (no .themis/blind_tdd/active_session.json => allow all), so safe always-on. Replaces the three settings.blind-*.json templates; per-role tool whitelists move into the agents/ frontmatter.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Edit|Write|NotebookEdit|NotebookRead",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/blind_tdd_path_guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/blind_tdd_bash_guard.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/blind_tdd_audit.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

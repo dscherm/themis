@@ -1,0 +1,8 @@
+{
+  "name": "blind-tdd",
+  "version": "0.1.0",
+  "description": "Test-first gate enforced by a blind agent that never sees the implementation: hash-locked red/green cycle, AC-N coverage, and challenge arbitration (writer/runner/arbiter).",
+  "author": { "name": "Dan Schermele" },
+  "license": "MIT",
+  "homepage": "https://github.com/dscherm/themis"
+}

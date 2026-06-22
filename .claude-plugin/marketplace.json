@@ -1,0 +1,13 @@
+{
+  "name": "themis",
+  "owner": { "name": "dscherm" },
+  "description": "Themis — a blind-TDD gate for AI-written code. Ships the engine (pip: themis-blind-tdd) and the blind-tdd Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "blind-tdd",
+      "source": "./plugin/blind-tdd",
+      "description": "Blind TDD gate: a fresh agent writes failing tests from the spec alone (path-guard hook blocks implementation reads), the implementer makes them pass, a blind runner verifies green, and an arbiter rules on challenges.",
+      "category": "testing"
+    }
+  ]
+}
