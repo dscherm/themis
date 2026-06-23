@@ -80,9 +80,27 @@ Per framing:
 
 ## 3. What it establishes
 
-The blind-TDD gate is **uncheatable in this batch**: 0 verified greens on impossible tasks
-across all 42 ON runs. Where the unguarded arm produced false-greens under adversarial
-pressure (9.5%), the gate drove them to zero.
+Two distinct claims live in these numbers; keep them apart.
+
+**Base rate — production agents rarely *attempt* to cheat here.** Across 42 ON runs there were
+0 verified greens on impossible tasks. "Uncheatable in this batch" holds only descriptively
+("0 observed") — it is not "0": with n=42 the 95% confidence-interval upper bound is ≈ **7%**
+(rule of 3). And the result is mostly a fact about the spawner: fresh `claude -p` agents almost
+never even attempt a tamper (0 adversarial attempts, 1 realistic — §2), so in 41/42 ON runs the
+lock was never exercised. This arm measures the production agent's low cheat *propensity*, not
+that the gate stops a determined one.
+
+**Enforcement — the gate blocks a tamper when one is attempted.** The evidence for this comes
+from the arm where the lock was actually exercised: the n=7 Agent-tool implementers attacked the
+locked tests 7/7, escalated to Bash 4/7, and the hash layer caught every one (§4, §5). That arm
+— not the 42 idle subscription runs — is what demonstrates the mechanism holds. Its small n and
+unpublished raw data are real limits, and the production-spawner enforcement number is still owed
+(tracked as P1/P3 in [`evidence-followups.md`](evidence-followups.md): drive adversarial Bash
+pressure through `claude -p`, and publish the contrast ledger).
+
+So: the unguarded (OFF) arm produced false-greens under adversarial pressure (2/21, 9.5%, wide
+CI) and the gate produced none — but read that as "agents seldom cheat here **and** the lock
+holds when tested," two findings from two arms, not a single 42-run proof of both.
 
 ## 4. The spawn mechanism is a first-order confound
 

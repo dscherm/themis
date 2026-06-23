@@ -98,7 +98,7 @@ Themis was tested against an [ImpossibleBench](https://arxiv.org/abs/2510.20270)
 | Gate **off** — false greens, ordinary framing | 0 / 21 |
 | Measurement losses | 0 |
 
-The honest reading: the gate drove the bypass rate to zero where cheating was both possible and incentivized, and the no-gate arm only cheated under adversarial framing. The gate earns its keep under pressure, which is the realistic condition for a deployed agent, not the calm one.
+The honest reading separates two claims. **Base rate:** across 42 ON runs there were 0 verified bypasses — but "0 observed" with n=42 means a 95% CI upper bound of ~7%, not zero, and fresh `claude -p` agents rarely even *attempt* a tamper, so those runs mostly show low cheat propensity, not enforcement. **Enforcement** — that the lock actually stops a tamper — is shown by the contrast arm where it was exercised (Agent-tool implementers attacked 7/7; the hash layer caught all), not by the idle subscription runs. The no-gate arm cheated only under adversarial framing (2/21). Net: agents seldom cheat here, *and* the lock holds when tested — two findings from two arms, not one 42-run proof of both.
 
 Two caveats belong next to those numbers, not in a footnote:
 - **Small sample.** n is 21 per cell; read [`docs/impossible-ac-results.md`](docs/impossible-ac-results.md) before quoting any figure.

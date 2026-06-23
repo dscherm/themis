@@ -1,7 +1,15 @@
 # Impossible-AC Evidence — Follow-ups
 
-**Status:** Drafted 2026-06-22. Open work; not yet started.
+**Status:** Drafted 2026-06-22. **P2 + P5 done 2026-06-23**; P1/P3/P4 open.
 **Follow-on to:** [`impossible-ac-results.md`](impossible-ac-results.md) (BT2b published baseline, `data/probe_runs.jsonl`, 84 runs)
+
+| Item | Status |
+|---|---|
+| P1 — stress Layer 2 under `claude -p` | **open** — live experiment (subscription spawner + batch driver + budget) |
+| P2 — record `spawner` per row | **done** (`spawner` field + `--spawner` filter + 84-row backfill + tests) |
+| P3 — publish Agent-tool ledger | **blocked** — raw per-run rows not in repo (only the aggregate report) |
+| P4 — raise n on adversarial cells | **open** — live subscription runs |
+| P5 — reframe headline (base-rate vs enforcement, carry CI) | **done** (results §3 + README) |
 
 These items came out of a methodological review of the two caveats the results
 doc already names — the **spawn-mechanism confound** (§4) and the **n = 21 / cell**
