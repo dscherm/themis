@@ -59,11 +59,22 @@ gate-runner process that reads it:
 - The green report (`.themis/blind_tdd/green_report/<task_id>.json`) is likewise a
   filesystem artifact the runner trusts.
 
-In other words, Themis raises the cost of cheating from "edit one assertion" to
-"compromise the gate's own state store," but it does not make the latter
-impossible. It assumes the harness running the gate is trusted; it is not a
-sandbox against an adversary who already controls the gate's process or its state
-directory.
+**Mitigation (optional, opt-in): sign the seal record.** Set `THEMIS_SEAL_KEY` in
+the gate/host environment. The red phase then HMAC-SHA256s the baseline into the
+record (`seal_hmac`), and the green phase verifies it before trusting the
+baseline — a modified record fails (fail-closed: a signed record with no key to
+verify it is also rejected). The spawner strips `THEMIS_SEAL_KEY` from every
+spawned agent's environment (like `ANTHROPIC_API_KEY`), so the writer/implementer/
+runner can read the record but cannot forge its signature. This raises the bar
+from "edit a JSON number" to "exfiltrate a key the spawner deliberately
+withholds." When the key is unset, records are unsigned and verification is a
+no-op — unchanged behavior, no false failures.
+
+This does not make tampering *impossible* — it shrinks the problem to protecting
+one key. Themis still assumes the gate's own process is trusted; it is not a
+sandbox against an adversary who already controls that process or can read its
+environment. For that, isolate the gate from the agent (run it host-side, outside
+the agent's sandbox).
 
 ## Blindness is only as complete as its configuration
 

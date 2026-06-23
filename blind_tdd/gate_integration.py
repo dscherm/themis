@@ -51,6 +51,8 @@ a fresh red phase.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -234,6 +236,63 @@ def _red_state_path(task_id: str) -> Path:
     return Path(".themis") / "blind_tdd" / "red_state" / f"{task_id}.json"
 
 
+# ---------------------------------------------------------------------------
+# Seal-record integrity (optional HMAC over the red-state baseline)
+#
+# The hash lock defends the *test files*. But the green phase trusts the
+# baseline hashes stored in red_state/<task_id>.json — a plain file in the
+# project tree. A Bash-capable implementer could edit a locked test AND rewrite
+# its stored hash here, re-sealing the cheat. Signing the baseline closes that:
+# the HMAC is computed with a key the agent's environment never carries (the
+# spawner strips THEMIS_SEAL_KEY, like ANTHROPIC_API_KEY), so a tampered record
+# fails verification at green.
+#
+# Opt-in by design: set THEMIS_SEAL_KEY in the host/gate environment. When it is
+# unset, records are written unsigned and verification is a no-op — same behavior
+# as before, no false breakage. This raises the bar from "edit a JSON number" to
+# "exfiltrate a key the spawner deliberately withholds"; it does NOT defend
+# against an adversary who already controls the gate process itself.
+# ---------------------------------------------------------------------------
+
+SEAL_KEY_ENV = "THEMIS_SEAL_KEY"
+
+
+def _seal_key() -> bytes | None:
+    raw = os.environ.get(SEAL_KEY_ENV)
+    return raw.encode("utf-8") if raw else None
+
+
+def _seal_signature(task_id: str, test_file_hashes: dict, key: bytes) -> str:
+    """Deterministic HMAC-SHA256 over the task id + its sealed test hashes."""
+    payload = json.dumps(
+        {"task_id": task_id, "test_file_hashes": test_file_hashes},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_red_state_seal(state: dict) -> tuple[bool, str]:
+    """Check a loaded red-state record's HMAC before its baseline is trusted.
+
+    Returns (ok, reason). Fail-closed: if a record carries a signature but no key
+    is available to check it, the seal is NOT trusted.
+    """
+    stored = state.get("seal_hmac")
+    key = _seal_key()
+    if stored is None:
+        # Unsigned record (no key set at red time). Back-compat: nothing to verify.
+        return True, "unsigned (THEMIS_SEAL_KEY not set at seal time)"
+    if key is None:
+        return False, ("red-state is signed but THEMIS_SEAL_KEY is unavailable to "
+                       "verify it — refusing to trust the baseline")
+    expected = _seal_signature(
+        state.get("task_id", ""), state.get("test_file_hashes") or {}, key,
+    )
+    if hmac.compare_digest(expected, str(stored)):
+        return True, "seal verified"
+    return False, "red-state HMAC mismatch — the seal record was modified"
+
+
 def save_red_state(task_id: str, result: RedPhaseResult) -> None:
     p = _red_state_path(task_id)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +303,9 @@ def save_red_state(task_id: str, result: RedPhaseResult) -> None:
         "triage_report": result.triage_report,
         "spawn_agent_id": (result.spawn_result or {}).get("agent_id"),
     }
+    key = _seal_key()
+    if key is not None:
+        state["seal_hmac"] = _seal_signature(task_id, result.test_file_hashes, key)
     p.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -519,6 +581,21 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
         )
 
     # ---- GREEN PHASE ----
+    # Before trusting the stored baseline, verify the seal record wasn't itself
+    # tampered with (a Bash-capable implementer rewriting both a locked test and
+    # its recorded hash). No-op when records are unsigned (THEMIS_SEAL_KEY unset).
+    seal_ok, seal_reason = verify_red_state_seal(red_state)
+    if not seal_ok:
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="green",
+            message=f"seal record integrity check failed: {seal_reason}",
+            reason="seal_tampered",
+            task_id=task_id,
+            details={"seal_reason": seal_reason},
+        )
+
     red_result = _red_state_to_result(red_state)
     try:
         green = orch.run_green_phase(task, red_result)

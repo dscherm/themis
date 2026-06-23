@@ -70,6 +70,10 @@ def subscription_env(base: dict | None = None, *, strip_api_key: bool = True) ->
     src = dict(os.environ if base is None else base)
     if strip_api_key:
         src.pop("ANTHROPIC_API_KEY", None)
+    # The seal-signing key MUST never reach a spawned agent (writer/implementer/
+    # runner) — an agent that could read it could forge a red-state HMAC and
+    # re-seal a tampered test. Stripped unconditionally, independent of auth mode.
+    src.pop("THEMIS_SEAL_KEY", None)
     return src
 
 
