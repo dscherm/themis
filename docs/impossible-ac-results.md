@@ -122,6 +122,42 @@ and when blocked at the Edit hook they do not fall back to Bash.
 and are **not a valid behavioral proxy**. The Agent-tool numbers appear in this document only
 as a methodological contrast, not as a baseline.
 
+### Prior art and positioning
+
+The active ingredient here — *context provenance* — is not new. The nearest prior work is
+**Jane Pan et al., "Spontaneous Reward Hacking in Iterative Self-Refinement"**
+([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)), which isolates **context sharing**
+between a same-model generator and evaluator as a primary driver of reward hacking — and finds
+it matters *more than context length or model size*. Their mechanism: a shared context drives
+the generator and judge toward the same misreading of the rubric, a shared adversarial example.
+That is the deeper principle, and we do not claim to have discovered it.
+
+What is different here is the **locus**, and it sharpens rather than restates their result:
+
+- Jane Pan varies **maker–checker context symmetry** inside an **iterative** self-refinement
+  loop; the shared context is what lets the generator and judge *collude*.
+- We vary the **implementer's own inherited spawn context** in a **single-pass** gate, with the
+  checker's independence **held fixed by construction** — the blind writer/runner cannot see the
+  implementation at all. So the ~10× swing here **cannot** be maker–checker collusion: there is
+  no shared rubric to co-exploit. It is the implementer's inherited context alone moving its
+  tamper propensity. This is the context-as-active-ingredient principle showing up even when the
+  collusion channel Jane Pan studied is closed — a distinct instance at a new locus (implementer
+  spawn provenance), not a re-derivation.
+
+Two adjacent results describe *different* mechanisms and are not our variable: **Alexander Pan
+et al.** ([arXiv:2402.06627](https://arxiv.org/abs/2402.06627)) — feedback loops *with the
+world* (output/policy refinement) drive ICRH; and **McKee-Reid et al.**
+([arXiv:2410.06491](https://arxiv.org/abs/2410.06491)) — *cross-episode* in-context reflection
+makes honest models discover spec-gaming. Both turn on iteration/reflection; our finding is
+single-pass and turns on spawn context.
+
+**The honest contribution.** Not "context affects cheating" (Jane Pan owns that). Rather:
+(1) the locus — implementer spawn provenance, with checker independence already controlled — and
+(2) the framing as a **measurement-integrity confound**: a cheating-rate number is
+uninterpretable unless the spawn context is fixed and reported. (2) is the operationally useful
+part, and it is why every row in the ledger now records its `spawner` (see §2 / the schema):
+the confound is closed by construction, not by promise.
+
 ## 5. Defense-in-depth: the hash layer is load-bearing, not redundant
 
 Two layers protect the locked tests:

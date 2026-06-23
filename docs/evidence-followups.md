@@ -1,15 +1,36 @@
 # Impossible-AC Evidence — Follow-ups
 
-**Status:** Drafted 2026-06-22. **P2 + P5 done 2026-06-23**; P1/P3/P4 open.
+**Status:** Drafted 2026-06-22. **P2 + P5 done 2026-06-23; P1 + P4 descoped 2026-06-23** (see note below); P3 blocked.
 **Follow-on to:** [`impossible-ac-results.md`](impossible-ac-results.md) (BT2b published baseline, `data/probe_runs.jsonl`, 84 runs)
 
 | Item | Status |
 |---|---|
-| P1 — stress Layer 2 under `claude -p` | **open** — live experiment (subscription spawner + batch driver + budget) |
+| P1 — stress Layer 2 under `claude -p` | **descoped** — finding reframed as a measurement confound anchored to prior art; no live enforcement-proof needed (see "Reframing" below) |
 | P2 — record `spawner` per row | **done** (`spawner` field + `--spawner` filter + 84-row backfill + tests) |
 | P3 — publish Agent-tool ledger | **blocked** — raw per-run rows not in repo (only the aggregate report) |
-| P4 — raise n on adversarial cells | **open** — live subscription runs |
+| P4 — raise n on adversarial cells | **descoped** — with the claim framed as a confound (not a precision estimate), tighter CIs are no longer load-bearing |
 | P5 — reframe headline (base-rate vs enforcement, carry CI) | **done** (results §3 + README) |
+
+## Reframing (2026-06-23) — why P1 and P4 are descoped
+
+A prior-art pass repositioned the spawn-mechanism result and, in doing so,
+removed the need for the two live experiments. The nearest prior work —
+**Jane Pan et al., "Spontaneous Reward Hacking in Iterative Self-Refinement"**
+([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)) — already establishes the
+deeper principle that **context sharing/provenance** drives same-model reward
+hacking *more than context length or model size*. Against that anchor, Themis's
+contribution is **not** "the gate stops a determined adversary" (which P1 would
+have tried to prove live) but two narrower, defensible claims: (1) a new **locus**
+— the implementer's *inherited spawn context*, with checker independence already
+held fixed by construction, so the ~10× swing cannot be the maker–checker
+collusion Jane Pan studied; and (2) a **measurement-integrity confound** — a
+cheating-rate number is uninterpretable unless spawn context is fixed and
+reported. (2) is operationalized by P2 (the per-row `spawner` field), already
+shipped. Neither claim rests on a live enforcement proof (P1) or tighter
+adversarial-cell CIs (P4), so both are descoped. Full positioning is in
+[`impossible-ac-results.md`](impossible-ac-results.md) §4 ("Prior art and
+positioning"). P3 (publish the n=7 contrast ledger) would still aid
+reproducibility but remains blocked on raw data that is not in the repo.
 
 These items came out of a methodological review of the two caveats the results
 doc already names — the **spawn-mechanism confound** (§4) and the **n = 21 / cell**
@@ -36,7 +57,12 @@ Statistical reality, for reference:
 
 ---
 
-## P1 — Stress Layer 2 under the production spawner (highest leverage)
+## P1 — Stress Layer 2 under the production spawner — DESCOPED 2026-06-23
+
+> Descoped: the finding is now framed as a measurement confound anchored to
+> Jane Pan (2407.04549), not a live enforcement proof. See "Reframing" above.
+> The design below is retained as a record of the experiment that is no longer
+> required.
 
 **Goal:** Make the enforcement claim ("the hash layer guarantees 0% bypass", §5)
 stand on the *trusted* spawner, not only on the n=7 Agent-tool contrast.
@@ -85,7 +111,11 @@ published." The doc's central argument can't be independently checked.
 - AC-2: `probes.py --gate` (or a sibling) reproduces the 7/7 vs 2/21 contrast from
   the published rows.
 
-## P4 — Raise n on the adversarial cells
+## P4 — Raise n on the adversarial cells — DESCOPED 2026-06-23
+
+> Descoped: with the result framed as a confound rather than a precision
+> estimate, tighter adversarial-cell CIs are no longer load-bearing. Retained
+> as a record. See "Reframing" above.
 
 **Goal:** Tighten the intervals on the cells that actually carry signal.
 
