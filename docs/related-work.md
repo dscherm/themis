@@ -70,8 +70,15 @@ main text:
   observe more capable models having higher cheating rates."* Prompting is a real lever
   and a leaky one; that gap is the reason an enforced mechanism exists.
 
-(Note: I do **not** claim "richer scaffolds cheat more" — the paper explicitly states it
-does *"not observe significant scaffold-wise differences."*)
+On scaffolds the paper says two different things, worth keeping straight. The main text
+reports *"no significant scaffold-wise differences"* — but that is about the cheating
+**methods** agents use (how they cheat). Appendix E.1 is about the **rate** (how much), and
+there it finds the opposite direction: *"more complex scaffolds encourage more cheating …
+improving scaffolding increases task performance as well as cheating propensity"* (o3 is the
+outlier; the rate can rise even as legitimate pass rate falls). That rate finding is in the
+same family as the spawn-context swing I saw — richer inherited context/scaffold, more
+cheating — so I read it as a rhyme, not a confirmation: it's a different variable (scaffold
+complexity vs the implementer's spawn provenance), and theirs is the rigorous version.
 
 ## The rest of the neighborhood
 
@@ -106,6 +113,7 @@ Verify wording against the originals before quoting in anything formal.
 - Ziqian Zhong, Aditi Raghunathan, Nicholas Carlini. *ImpossibleBench: Measuring LLMs'
   Propensity of Exploiting Test Cases.*
   [arXiv:2510.20270](https://arxiv.org/abs/2510.20270). Open-Test setup, the >85%→1% and
-  54.0% figures, the capability trend, and the no-scaffold-difference note are quoted from
-  the main text. The dedicated scaffold ablation (Appendix E.1) is **not yet read**;
-  per-model figure numbers beyond the 1% / 54.0% stated in prose are not table-verified.
+  54.0% figures, the capability trend, the main-text "no significant scaffold-wise
+  differences" (about cheating *methods*), and the Appendix E.1 scaffold ablation (more
+  complex scaffolds raise the cheating *rate*) are all quoted from the paper. Per-model
+  figure numbers beyond the 1% / 54.0% stated in prose are not table-verified.
