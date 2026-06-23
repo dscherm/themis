@@ -222,6 +222,8 @@ result = run_blind_tdd_gate(config)
 
 **Recommended for first adoption:** `"enforcement": "warn"` + `"spawner": "manual"`. You'll see briefs land in `.themis/blind_tdd/pending/` without any commit being blocked or any agent being spawned automatically.
 
+**Optional — harden the seal.** The red-state record that stores the test hashes is a file in your project tree, so a Bash-capable agent could rewrite both a test and its recorded hash. Set the env var `THEMIS_SEAL_KEY` (not a config-dict key — it's read from the environment, and the spawner strips it from every spawned agent) to HMAC-sign that record; the green phase then rejects a tampered one and fail-closes if a signed record can't be verified. Leave it unset and records are simply unsigned — no behavior change. See [`limitations.md`](limitations.md) for the threat-model boundary.
+
 ## Step 5 — mark the current task
 
 Tell the gate which task it's working on. Three sources, checked in order:
@@ -325,3 +327,5 @@ When both are set, the `THEMIS_*` value wins.
 - `<themis>/templates/blind_tdd/prompts/test_runner.md` — Agent #2 briefing
 - `<themis>/templates/blind_tdd/prompts/arbiter.md` — Agent #3 briefing (challenge protocol)
 - `blind_tdd/schema_validator.py` — the task-spec schema enforced at validate time
+- `blind_tdd/mutate.py` — optional, advisory **test-strength** pass: `python -m blind_tdd.mutate <src> --test-cmd "..."` perturbs the implementation and flags any mutant your tests fail to catch. Not part of the gate's guarantee; a survivor is a warning. See [`limitations.md`](./limitations.md#test-strength-is-not-measured).
+- [`limitations.md`](./limitations.md) — where the gate's guarantee ends; read before relying on it

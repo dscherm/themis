@@ -35,6 +35,8 @@ The design is permissions. Each agent is granted exactly what it needs and denie
 
 Before any implementation exists, each test file is fingerprinted with a SHA-256 hash and the fingerprints are recorded (in `.themis/blind_tdd/red_state/<task_id>.json`). At the green phase the runner recomputes each fingerprint and compares it to the sealed one. A test changed by any route, shell included, no longer matches and fails the run regardless of whether it now passes. Adding or deleting a locked test also breaks the comparison.
 
+That record is itself a file in the project tree, so a Bash-capable agent could in principle rewrite both a test and its stored hash. Set `THEMIS_SEAL_KEY` in the gate's environment to HMAC-sign the record — the green phase then rejects a modified one, and the spawner withholds the key from every spawned agent. Optional and opt-in; see [Limitations](#limitations).
+
 ## Pipeline
 
 ```
