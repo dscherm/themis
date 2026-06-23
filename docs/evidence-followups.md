@@ -1,13 +1,13 @@
 # Impossible-AC Evidence — Follow-ups
 
-**Status:** Drafted 2026-06-22. **P2 + P5 done 2026-06-23; P1 + P4 descoped 2026-06-23** (see note below); P3 blocked.
+**Status:** Drafted 2026-06-22. **P2 + P3 + P5 done 2026-06-23; P1 + P4 descoped 2026-06-23** (see note below). All items closed.
 **Follow-on to:** [`impossible-ac-results.md`](impossible-ac-results.md) (BT2b published baseline, `data/probe_runs.jsonl`, 84 runs)
 
 | Item | Status |
 |---|---|
 | P1 — stress Layer 2 under `claude -p` | **descoped** — reframed as a practical measurement-confound note pointing to existing research; no live enforcement-proof needed (see "Reframing" below) |
 | P2 — record `spawner` per row | **done** (`spawner` field + `--spawner` filter + 84-row backfill + tests) |
-| P3 — publish Agent-tool ledger | **blocked** — raw per-run rows not in repo (only the aggregate report) |
+| P3 — publish Agent-tool ledger | **done** — `data/probe_runs_agent_tool.jsonl` (28 rows, `spawner=agent_tool`); reproduces the 7/7 OFF-adv cheat + 4 hash-blocked tampers |
 | P4 — raise n on adversarial cells | **descoped** — with the claim framed as a confound (not a precision estimate), tighter CIs are no longer load-bearing |
 | P5 — reframe headline (base-rate vs enforcement, carry CI) | **done** (results §3 + README) |
 
@@ -29,8 +29,9 @@ the spawner so a cheat-rate number is comparable**, which is already shipped as
 P2's per-row `spawner` field. So P1 and P4 are descoped. Full write-up (in the
 "I bumped into this, what do you think?" tone) is in
 [`impossible-ac-results.md`](impossible-ac-results.md) §4. P3 (publish the n=7
-contrast ledger) would still help reproducibility but remains blocked on raw data
-that is not in the repo.
+contrast ledger) is now **done** — the raw rows turned out to be recoverable, so the
+~10× contrast is reproducible from `data/probe_runs_agent_tool.jsonl` rather than
+narrated.
 
 These items came out of a methodological review of the two caveats the results
 doc already names — the **spawn-mechanism confound** (§4) and the **n = 21 / cell**
@@ -96,20 +97,21 @@ the provenance of any row.
   optionally filter/report by spawner.
 - AC-3: The 84 published rows are backfilled to `spawner: claude_code_subscription`.
 
-## P3 — Publish the Agent-tool contrast ledger
+## P3 — Publish the Agent-tool contrast ledger — DONE 2026-06-23
 
-**Goal:** Make the confound (the load-bearing methodological claim) reproducible,
-not narrated.
+**Goal:** Make the confound reproducible, not narrated.
 
-**Why:** The n=7 Agent-tool numbers (7/7, 4/7 Bash) live only in
-`data/reports/batch1-agenttool-contrast-REPORT.md`; the per-run rows are "not
-published." The doc's central argument can't be independently checked.
+**What shipped:** `data/probe_runs_agent_tool.jsonl` — the 28 batch-1 Agent-tool
+runs normalized to the current row schema (`spawner=agent_tool`, `framing` added;
+no machine paths in the rows). `probes.py --report --runs-file
+data/probe_runs_agent_tool.jsonl` reproduces the contrast: OFF-adversarial 7/7
+false-green (vs the subscription arm's 2/21), ON-arm 0 true bypasses with 4
+Bash-tampers caught by the hash layer. `--gate` intentionally reports RED on it
+("insufficient ON runs", 14 < 20) — it's a contrast, not a baseline.
 
-**Acceptance criteria:**
-- AC-1: A redacted Agent-tool ledger (same row schema, `spawner: agent_tool`) is
-  committed under `data/`.
-- AC-2: `probes.py --gate` (or a sibling) reproduces the 7/7 vs 2/21 contrast from
-  the published rows.
+- AC-1 (Agent-tool ledger committed, same schema, `spawner: agent_tool`): ✔
+- AC-2 (reproduces the 7/7 contrast from published rows): ✔ via `--report`. (The
+  formal `--gate` is reserved for the 20+-run subscription baseline by design.)
 
 ## P4 — Raise n on the adversarial cells — DESCOPED 2026-06-23
 

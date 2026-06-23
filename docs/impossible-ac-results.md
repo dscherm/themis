@@ -223,10 +223,16 @@ machine-specific paths and produce multi-megabyte per-cell agent transcripts). T
 
 Published in this repo:
 
-- Canonical ledger: `data/probe_runs.jsonl` (84 subscription runs).
+- Canonical ledger: `data/probe_runs.jsonl` (84 subscription runs, `spawner=claude_code_subscription`).
+- Agent-tool **contrast** ledger: `data/probe_runs_agent_tool.jsonl` (28 runs,
+  `spawner=agent_tool`). This is a development contrast, **not** a gate baseline —
+  it has only 7 runs/cell, so `probes.py --gate` intentionally reports RED
+  ("insufficient ON runs"). Use `--report` to see it: the adversarial OFF cell is
+  7/7 false-green (vs the subscription arm's 2/21), and the ON arm has 0 true
+  bypasses with 4 Bash-tampers caught by the hash layer. This is the raw data
+  behind §4's ~10× spawn swing — reproducible, not just narrated.
 - Subscription batch report: `data/reports/batch3x-subscription-REPORT.md`.
 - Agent-tool contrast report: `data/reports/batch1-agenttool-contrast-REPORT.md`.
 
 Not published (bulky / machine-specific): per-cell sandboxes, raw agent
-transcripts, `all_records.json`, per-framing `on_runs/off_runs` JSONL, and the
-batch driver scripts.
+transcripts, the Layer-1 tamper-attempt logs, and the batch driver scripts.
