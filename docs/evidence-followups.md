@@ -5,7 +5,7 @@
 
 | Item | Status |
 |---|---|
-| P1 — stress Layer 2 under `claude -p` | **descoped** — finding reframed as a measurement confound anchored to prior art; no live enforcement-proof needed (see "Reframing" below) |
+| P1 — stress Layer 2 under `claude -p` | **descoped** — reframed as a practical measurement-confound note pointing to existing research; no live enforcement-proof needed (see "Reframing" below) |
 | P2 — record `spawner` per row | **done** (`spawner` field + `--spawner` filter + 84-row backfill + tests) |
 | P3 — publish Agent-tool ledger | **blocked** — raw per-run rows not in repo (only the aggregate report) |
 | P4 — raise n on adversarial cells | **descoped** — with the claim framed as a confound (not a precision estimate), tighter CIs are no longer load-bearing |
@@ -13,24 +13,24 @@
 
 ## Reframing (2026-06-23) — why P1 and P4 are descoped
 
-A prior-art pass repositioned the spawn-mechanism result and, in doing so,
-removed the need for the two live experiments. The nearest prior work —
+Reading a bit of the existing research changed what's worth doing here, and it
+removed the need for the two live experiments. The closest work —
 **Jane Pan et al., "Spontaneous Reward Hacking in Iterative Self-Refinement"**
-([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)) — already establishes the
-deeper principle that **context sharing/provenance** drives same-model reward
-hacking *more than context length or model size*. Against that anchor, Themis's
-contribution is **not** "the gate stops a determined adversary" (which P1 would
-have tried to prove live) but two narrower, defensible claims: (1) a new **locus**
-— the implementer's *inherited spawn context*, with checker independence already
-held fixed by construction, so the ~10× swing cannot be the maker–checker
-collusion Jane Pan studied; and (2) a **measurement-integrity confound** — a
-cheating-rate number is uninterpretable unless spawn context is fixed and
-reported. (2) is operationalized by P2 (the per-row `spawner` field), already
-shipped. Neither claim rests on a live enforcement proof (P1) or tighter
-adversarial-cell CIs (P4), so both are descoped. Full positioning is in
-[`impossible-ac-results.md`](impossible-ac-results.md) §4 ("Prior art and
-positioning"). P3 (publish the n=7 contrast ledger) would still aid
-reproducibility but remains blocked on raw data that is not in the repo.
+([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)) — already studies the
+underlying thing: **context sharing/provenance** drives same-model reward hacking
+*more than context length or model size*. They're the experts on the *why*. Given
+that, there's no need for me to try to prove "the gate stops a determined
+adversary" live (P1) or to chase tighter CIs (P4). What's actually useful to share
+as a builder is narrower: an observation (cheat rate swung ~10× with the
+implementer's spawn context, and here the checker is blind by construction so it
+can't be the maker–checker collusion Jane Pan studied — same effect, different
+spot? a question for researchers), plus one practical fix — **record and report
+the spawner so a cheat-rate number is comparable**, which is already shipped as
+P2's per-row `spawner` field. So P1 and P4 are descoped. Full write-up (in the
+"I bumped into this, what do you think?" tone) is in
+[`impossible-ac-results.md`](impossible-ac-results.md) §4. P3 (publish the n=7
+contrast ledger) would still help reproducibility but remains blocked on raw data
+that is not in the repo.
 
 These items came out of a methodological review of the two caveats the results
 doc already names — the **spawn-mechanism confound** (§4) and the **n = 21 / cell**

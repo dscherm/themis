@@ -122,41 +122,40 @@ and when blocked at the Edit hook they do not fall back to Bash.
 and are **not a valid behavioral proxy**. The Agent-tool numbers appear in this document only
 as a methodological contrast, not as a baseline.
 
-### Prior art and positioning
+### How this connects to existing research (and a question for people who study it)
 
-The active ingredient here — *context provenance* — is not new. The nearest prior work is
-**Jane Pan et al., "Spontaneous Reward Hacking in Iterative Self-Refinement"**
-([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)), which isolates **context sharing**
-between a same-model generator and evaluator as a primary driver of reward hacking — and finds
-it matters *more than context length or model size*. Their mechanism: a shared context drives
-the generator and judge toward the same misreading of the rubric, a shared adversarial example.
-That is the deeper principle, and we do not claim to have discovered it.
+I build tools; I'm not a researcher — so treat this as a practitioner's observation, not a
+claim. While measuring cheat rates on the gate I kept hitting the same thing: identical probes
+and prompts cheated ~10× more when the implementer was spawned as an in-conversation Agent-tool
+subagent than as a fresh `claude -p` agent. The thing that changed was the agent's inherited
+context.
 
-What is different here is the **locus**, and it sharpens rather than restates their result:
+When I went looking for why, the closest work I found is **Jane Pan et al., "Spontaneous Reward
+Hacking in Iterative Self-Refinement"** ([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)),
+which isolates **context sharing** between a same-model generator and evaluator as a driver of
+reward hacking — and finds it matters *more than context length or model size*. That reads like
+the same underlying force I bumped into, so for the actual science I'd point you there.
 
-- Jane Pan varies **maker–checker context symmetry** inside an **iterative** self-refinement
-  loop; the shared context is what lets the generator and judge *collude*.
-- We vary the **implementer's own inherited spawn context** in a **single-pass** gate, with the
-  checker's independence **held fixed by construction** — the blind writer/runner cannot see the
-  implementation at all. So the ~10× swing here **cannot** be maker–checker collusion: there is
-  no shared rubric to co-exploit. It is the implementer's inherited context alone moving its
-  tamper propensity. This is the context-as-active-ingredient principle showing up even when the
-  collusion channel Jane Pan studied is closed — a distinct instance at a new locus (implementer
-  spawn provenance), not a re-derivation.
+What I'm genuinely unsure about — and would like researchers' read on — is whether this is the
+*same* effect or a cousin, because the setup differs:
 
-Two adjacent results describe *different* mechanisms and are not our variable: **Alexander Pan
-et al.** ([arXiv:2402.06627](https://arxiv.org/abs/2402.06627)) — feedback loops *with the
-world* (output/policy refinement) drive ICRH; and **McKee-Reid et al.**
-([arXiv:2410.06491](https://arxiv.org/abs/2410.06491)) — *cross-episode* in-context reflection
-makes honest models discover spec-gaming. Both turn on iteration/reflection; our finding is
-single-pass and turns on spawn context.
+- In their loop a generator and a judge share context, and the shared context is what lets the
+  two **collude** on the same misreading of the rubric.
+- Here the checker is **blind by construction** — the writer/runner can't see the implementation
+  at all — so there's no shared rubric to co-exploit, yet the cheat rate still swings ~10× with
+  the implementer's spawn context alone. Is that the same context-as-active-ingredient principle
+  showing up where the collusion channel is closed, or something different? Honest question.
 
-**The honest contribution.** Not "context affects cheating" (Jane Pan owns that). Rather:
-(1) the locus — implementer spawn provenance, with checker independence already controlled — and
-(2) the framing as a **measurement-integrity confound**: a cheating-rate number is
-uninterpretable unless the spawn context is fixed and reported. (2) is the operationally useful
-part, and it is why every row in the ledger now records its `spawner` (see §2 / the schema):
-the confound is closed by construction, not by promise.
+Two more papers look related but seem to describe *different* mechanisms (iteration/reflection
+rather than a single spawn): **Alexander Pan et al.**
+([arXiv:2402.06627](https://arxiv.org/abs/2402.06627), feedback loops with the world) and
+**McKee-Reid et al.** ([arXiv:2410.06491](https://arxiv.org/abs/2410.06491), cross-episode
+in-context reflection).
+
+The part I'm actually confident about, as a builder, is small and practical: **a cheating-rate
+number isn't comparable unless you fix and report how the agent was spawned.** That's why every
+row in the ledger records its `spawner` (§2). If you're measuring this kind of thing, pin the
+spawn method — otherwise the number is partly measuring your harness.
 
 ## 5. Defense-in-depth: the hash layer is load-bearing, not redundant
 
