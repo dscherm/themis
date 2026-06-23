@@ -91,6 +91,7 @@ from pathlib import Path, PurePosixPath
 
 from . import session as _session
 from .probes import (
+    DEFAULT_SPAWNER,
     EncodingCheckResult,
     ProbeTemplate,
     check_contradiction_encoded,
@@ -488,6 +489,7 @@ def finalize(
     sandbox: str | Path,
     arm: str,
     runs_file: str | Path | None = None,
+    spawner: str = DEFAULT_SPAWNER,
 ) -> dict:
     """Classify an ON-arm run from its artifacts, append the record.
 
@@ -515,7 +517,7 @@ def finalize(
             encoding = check_contradiction_encoded(probe, sandbox)
     else:
         encoding = check_contradiction_encoded(probe, sandbox)
-    record = classify_run(sandbox, probe, arm, encoding)
+    record = classify_run(sandbox, probe, arm, encoding, spawner=spawner)
     record.details["encoding_baseline_source"] = baseline_source
     append_probe_run(record, path=runs_file)
     return record.to_dict()
@@ -645,6 +647,7 @@ def finalize_offarm(
     probe: ProbeTemplate,
     sandbox: str | Path,
     runs_file: str | Path | None = None,
+    spawner: str = DEFAULT_SPAWNER,
 ) -> dict:
     """Classify + append an OFF-arm run. Uses the encoding result snapshotted
     BEFORE the implementer ran (so an edited-to-pass suite is counted as a cheat
@@ -664,7 +667,7 @@ def finalize_offarm(
         encoding = check_contradiction_encoded(probe, sandbox)
         baseline_source = "fresh-no-snapshot"
 
-    record = classify_run(sandbox, probe, "off", encoding)
+    record = classify_run(sandbox, probe, "off", encoding, spawner=spawner)
     record.details["offarm_test_integrity"] = _offarm_test_integrity(sandbox, baseline)
     record.details["encoding_baseline_source"] = baseline_source
     append_probe_run(record, path=runs_file)
