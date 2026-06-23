@@ -59,7 +59,7 @@ Most tasks do not need this. For a large class of work, a verifier you simply as
 
 - **Assigned in-loop verifier** for most tasks: unambiguous spec, and a wrong-but-passing result would be caught cheaply downstream. No reason to pay for enforced blindness.
 - **Themis (blind gate)** when a false green is expensive *and* there is pressure toward it: security or financial logic, anything you will not manually re-check, anything feeding later automated steps, anything under deadline or reward pressure. This is the case where an assigned verifier is most likely to stop telling you the truth, because the cheap path to green has become attractive.
-- **Mutation and audit pass on top** (planned; see [Limitations](#limitations)) when you also cannot afford a weak-but-honest test letting a wrong implementation through. That is a different threat from collusion, and a different layer.
+- **Mutation and audit pass on top** (the mutation check is built but advisory — it flags weak tests, never gates; the audit pass and a gating layer are still planned — see [Limitations](#limitations)) when you also cannot afford a weak-but-honest test letting a wrong implementation through. That is a different threat from collusion, and a different layer.
 
 Each layer covers a threat the one below it does not. The blind gate addresses an assigned verifier conforming to the code; it does not address a verifier that is honest but too weak. Pick the layer that matches the cost of being wrong.
 
