@@ -34,5 +34,11 @@ jobs:
       - name: Test suite
         run: python -m pytest
 
+      - name: Plugin test suite
+        run: python -m pytest plugin/blind-tdd/ -q
+
+      - name: Agent-tool contrast ledger loads and classifies (smoke)
+        run: python -m blind_tdd.probes --report --runs-file data/probe_runs_agent_tool.jsonl
+
       - name: Published impossible-AC ledger still reproduces GREEN
         run: python -m blind_tdd.probes --gate --runs-file data/probe_runs.jsonl --min-on-runs 20
