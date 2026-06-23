@@ -30,12 +30,19 @@ can be independent, untampered, AC-tagged, and still too weak to catch a real bu
 (it might assert a return type but not the value).
 
 Measuring strength means perturbing the implementation and checking whether some
-test fails — **mutation testing** — which requires an agent that *can* read the
-code, the opposite of the blind writer. That is a separate, planned capability
-(`tools/mutate.py`, not yet built) plus an audit pass over `tests/mutation/` and
-`tests/audit/`, not part of the gate. So a green gate is **necessary but not
-sufficient** for correctness: it guarantees the code satisfies an independent,
-untampered test of every criterion — not that those tests are exhaustive.
+test fails — **mutation testing** — which requires something that *can* read the
+code, the opposite of the blind writer. So it is necessarily a separate,
+**advisory** pass, not part of the gate. That pass now exists: `blind_tdd.mutate`
+applies deterministic single-change AST mutations to a source file, runs the suite
+against each in a wall-clock-bounded subprocess (a mutated conditional can spin —
+that is recorded as a timeout, never a hang), and reports any **surviving** mutant
+(one the tests still pass) as a weak spot. It is advisory by design — a survivor
+is a warning, never a gate failure — and it does not change the gate's guarantee.
+(Equivalent mutants exist — a change that cannot alter behavior, e.g. adding 0 —
+so a non-zero survivor count is a prompt to look, not proof of a weak test.) So a
+green gate remains **necessary but not sufficient** for correctness: it guarantees
+the code satisfies an independent, untampered test of every criterion — not that
+those tests are exhaustive.
 
 ## The hash seal assumes an intact baseline
 
