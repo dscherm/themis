@@ -157,6 +157,10 @@ number isn't comparable unless you fix and report how the agent was spawned.** T
 row in the ledger records its `spawner` (§2). If you're measuring this kind of thing, pin the
 spawn method — otherwise the number is partly measuring your harness.
 
+A fuller, practitioner's-eye map of how this and Themis relate to the published research
+(Jane Pan as the anchor; ImpossibleBench on why asking isn't enough) is in
+[`related-work.md`](related-work.md).
+
 ## 5. Defense-in-depth: the hash layer is load-bearing, not redundant
 
 Two layers protect the locked tests:

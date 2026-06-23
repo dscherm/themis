@@ -112,6 +112,8 @@ The full, honest list (including the spec-as-trust-boundary problem, the absence
 
 The principle is old: a checker cannot be independent of the thing it checks. It is the logic of clean-room software development (a separate team certifies code its authors never test) and separation of duties (whoever writes the check cannot sign it), and the general failure it guards against is reward hacking, or Goodhart's law. Themis applies those ideas to AI-written code, with the independence enforced as a permission rather than a policy. That last point is the distinction from the spec-driven-development tools that assign a verifier as a role the agent is asked to play, where the verifier can still read the implementation and the tests can still be edited after the fact.
 
+On the empirical side, two papers map closely. Jane Pan et al. ([arXiv:2407.04549](https://arxiv.org/abs/2407.04549)) show *why* this fails — when one model is both author and judge with shared context, the two quietly converge on the same wrong answer; Themis is, in effect, an attempt to engineer that sharing away. And ImpossibleBench ([arXiv:2510.20270](https://arxiv.org/abs/2510.20270)) shows that asking an agent not to edit the tests helps but isn't enough: a good prompt cuts GPT-5's cheating to 1% on easy tasks, yet it still cheats 54% on hard multi-file ones — the case for a mechanism over a polite request. A fuller, practitioner's-eye map of the related research is in [`docs/related-work.md`](docs/related-work.md).
+
 ## Provenance
 
 Themis is the standalone extraction of a blind-TDD gate built inside a larger agent-learning harness. The blind gate itself (the hooks, the hash seal, the arbiter, and the impossible-AC probe harness) is original to this project.
