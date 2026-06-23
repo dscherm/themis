@@ -1,7 +1,25 @@
 # Blind-TDD Fidelity Improvements — Plan
 
-**Status:** Drafted 2026-04-10. Decisions locked, not yet implemented.
+**Status:** Drafted 2026-04-10. **All three additions implemented as of 2026-06-23**
+(see "Implementation status" below). Paths in the plan body predate the Themis
+extraction — the modules now live at `blind_tdd/…`, not `tools/blind_tdd/…`.
 **Follow-on to:** `blind-tdd-gate-rfc.md` (functionally complete as of `c3c95f0`)
+
+## Implementation status (2026-06-23)
+
+- **Addition 1 — preflight: shipped.** `blind_tdd/preflight.py` (+ `test_preflight.py`),
+  wired into `gate_integration.run_blind_tdd_gate` and controlled by
+  `gate.blind_tdd.preflight = strict | warn | off`.
+- **Addition 2 — task linter: shipped.** `blind_tdd/lint_tasks.py` (+ `test_lint_tasks.py`).
+  The `smart_gate.py` "run on plan.md change" wiring is a ralph-harness concern, not
+  part of the standalone Themis engine.
+- **Addition 3 — parameterized examples: shipped.** The writer prompt instructs
+  parametrized tests from a criterion's `examples`, and `schema_validator.py` warns on
+  multi-case phrasing that has no `examples`.
+
+The plan text below is preserved as the original design record.
+
+---
 
 This plan covers three additive improvements to the blind-TDD gate's *input fidelity* — the quality of the task specs that feed the pipeline. None of these are on the original RFC's remaining-work list; they emerged from an in-session conversation about how to improve protocol adherence by tightening the front door rather than the back door.
 
