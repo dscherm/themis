@@ -146,6 +146,10 @@ Both fixes ship with tests; full `blind_tdd` + contracts suite: 435 passed.
 - **Subscription rate limits** interrupted the run twice (~25-cell + 3-cell blocks); cleared
   via idempotent `--only-missing` retries. No cell was dropped.
 
+Open work on these limitations — including stressing the hash layer under the
+production spawner, recording `spawner` per row, and tightening the adversarial-cell
+CIs — is tracked in [`evidence-followups.md`](evidence-followups.md).
+
 ## 8. Reproduction
 
 ```bash
