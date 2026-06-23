@@ -102,7 +102,7 @@ The honest reading separates two claims. **Base rate:** across 42 ON runs there 
 
 Two caveats belong next to those numbers, not in a footnote:
 - **Small sample.** n is 21 per cell; read [`docs/impossible-ac-results.md`](docs/impossible-ac-results.md) before quoting any figure.
-- **The spawn mechanism is a first-order confound.** Identical probes cheated ~100% through in-conversation subagents and ~9.5% through fresh `claude -p` agents, a roughly tenfold swing driven by how the agent was spawned. Every reported number uses the production spawner. Any agent-behavior measurement that does not control for this is partly measuring its own harness.
+- **How the agent is spawned moved the result a lot.** Identical probes cheated ~10× more through in-conversation Agent-tool subagents than through fresh `claude -p` agents — same task, same prompt, different inherited context. So every number here uses the production `claude -p` spawner, and each row in the ledger records its `spawner`. The practical takeaway, the part I'm confident about as a builder: if you're measuring cheat rates, pin and report the spawn method, or you're partly measuring your own harness. This looks to me like the context-as-active-ingredient effect Jane Pan et al. ([2407.04549](https://arxiv.org/abs/2407.04549)) study — [`docs/impossible-ac-results.md`](docs/impossible-ac-results.md) §4 has the honest question I'd put to researchers about whether it's the same effect or a cousin.
 
 ## Limitations
 
