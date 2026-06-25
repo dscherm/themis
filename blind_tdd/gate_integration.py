@@ -67,6 +67,7 @@ from .orchestrator import (
     RedPhaseResult,
 )
 from .preflight import preflight_task, MODE_OFF
+from .routing import evaluate_routing, normalize_routing
 from .schema_validator import validate_task
 
 
@@ -96,6 +97,7 @@ def get_blind_tdd_config(config: dict) -> dict:
         "themis_home": raw.get("themis_home", raw.get("ralph_home")),  # None → autodetect; ralph_home = legacy alias
         "spawn_timeout_seconds": int(raw.get("spawn_timeout_seconds", 1800)),
         "preflight": str(raw.get("preflight", "strict")),
+        "routing": normalize_routing(raw.get("routing")),
     }
 
 
@@ -475,6 +477,21 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
         )
 
     task_id = str(task.get("id", "unknown"))
+
+    # Routing: does the policy select this task for the (expensive) blind gate?
+    # The decision is made from operator-authored task metadata, never from the
+    # implementing agent — see routing.py's trust note. A non-selected task is
+    # skipped here so an ordinary in-loop verifier can cover it.
+    decision = evaluate_routing(task, btd_cfg["routing"])
+    if not decision.gate:
+        return BlindGateResult(
+            passed=True,
+            phase="skipped",
+            message=f"task {task_id!r} not selected by blind-tdd routing: {decision.reason}",
+            reason="routing_excluded",
+            task_id=task_id,
+            details={"routing_reason": decision.reason, "source": source},
+        )
 
     # Validate the task spec before spending API budget on an agent spawn.
     vr = validate_task(task)
