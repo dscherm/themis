@@ -219,6 +219,41 @@ result = run_blind_tdd_gate(config)
 | `themis_home` | _(unset)_ | **Optional.** Overrides where prompt/hook templates are found. Leave unset standalone — templates resolve relative to the installed package. (Legacy alias: `ralph_home`.) |
 | `claude_binary` | `"claude"` | Path or name of the claude CLI |
 | `spawn_timeout_seconds` | `1800` | Per-agent spawn timeout |
+| `routing` | _(gate every task)_ | **Optional.** Restricts the gate to selected tasks (see below). Omit it and every resolved task is gated, as before. |
+
+### Routing — which tasks get the gate
+
+The blind gate is expensive (several agent passes where an in-loop verifier makes one). Most tasks don't need it. The `routing` block reserves the gate for high-stakes work and lets an ordinary assigned verifier cover the rest. Set it once with the setup wizard rather than by hand:
+
+```bash
+# interactive
+python -m blind_tdd.init
+
+# or non-interactive / CI
+python -m blind_tdd.init --enable --path-glob 'billing/**' --tag security \
+    --min-severity high --keyword password --yes
+```
+
+Plugin users can run the same interview as a slash command: **`/blind-tdd:setup`**.
+
+It writes a policy like:
+
+```json
+"routing": {
+  "mode": "selective",
+  "path_globs": ["billing/**", "auth/**"],
+  "tags": ["security", "high-stakes"],
+  "min_severity": "high",
+  "keywords": ["payment", "password", "token"]
+}
+```
+
+`mode: "all"` (the default when there's no `routing` block) gates every task. `mode: "selective"` gates a task if it matches **any** predicate: a `path_globs` entry against the task's declared `files`/`public_surface`, a `tags` entry, a severity at or above `min_severity` (`low` < `medium` < `high` < `critical`), or a `keywords` substring in the spec text. A non-matching task is skipped with `reason="routing_excluded"`.
+
+**Two things to keep honest about routing:**
+
+1. **The decision must stay out of the worker's reach — and so must the metadata it reads.** Routing is consulted from operator-authored task metadata, never from the implementing agent. If a worker could author its own task `tags`/`severity`, it could label itself "low-stakes" to dodge the gate exactly when the pressure to cheat is highest. Of the four predicates, `path_globs` is the most evasion-resistant (file paths come from the spec, not the agent); `tags`/`min_severity`/`keywords` are only as trustworthy as whoever writes them. The setup wizard exists so a **human** sets the policy once.
+2. **Routing decides coverage, not integrity.** A task that *is* gated still gets the full sealed, blind treatment. Routing only chooses which tasks pay for it. (Routing the *non-gated* tasks to an ordinary verifier is the host loop's job — the gate can only skip.)
 
 **Recommended for first adoption:** `"enforcement": "warn"` + `"spawner": "manual"`. You'll see briefs land in `.themis/blind_tdd/pending/` without any commit being blocked or any agent being spawned automatically.
 

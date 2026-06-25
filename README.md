@@ -63,6 +63,8 @@ Most tasks do not need this. For a large class of work, a verifier you simply as
 
 Each layer covers a threat the one below it does not. The blind gate addresses an assigned verifier conforming to the code; it does not address a verifier that is honest but too weak. Pick the layer that matches the cost of being wrong.
 
+You can encode that "most tasks don't need this" line as policy instead of judgment: a **routing** block reserves the gate for the tasks that match it (by path glob, tag, severity, or keyword) and lets everything else fall through to an ordinary verifier. Set it once with `python -m blind_tdd.init` (or the `/blind-tdd:setup` plugin command) — the policy is human-set on purpose, because the trigger must be a rule the implementing agent can't choose to skip. See [`docs/adoption-guide.md`](docs/adoption-guide.md#routing--which-tasks-get-the-gate).
+
 ## Quickstart
 
 ```bash
@@ -100,7 +102,7 @@ Themis was tested against an [ImpossibleBench](https://arxiv.org/abs/2510.20270)
 | Gate **off** — false greens, ordinary framing | 0 / 21 |
 | Measurement losses | 0 |
 
-The honest reading separates two claims. **Base rate:** across 42 ON runs there were 0 verified bypasses — but "0 observed" with n=42 means a 95% CI upper bound of ~7%, not zero, and fresh `claude -p` agents rarely even *attempt* a tamper, so those runs mostly show low cheat propensity, not enforcement. **Enforcement** — that the lock actually stops a tamper — is shown by the contrast arm where it was exercised (Agent-tool implementers attacked 7/7; the hash layer caught all), not by the idle subscription runs. The no-gate arm cheated only under adversarial framing (2/21). Net: agents seldom cheat here, *and* the lock holds when tested — two findings from two arms, not one 42-run proof of both.
+The honest reading separates two claims. **Base rate:** across 42 ON runs there were 0 verified bypasses — but "0 observed" with n=42 means a 95% CI upper bound of ~7%, not zero, and fresh `claude -p` agents rarely even *attempt* a tamper, so those runs mostly show low cheat propensity, not enforcement. **Enforcement** — that the lock actually stops a tamper — is shown by the contrast arm where it was exercised (Agent-tool implementers attacked the locked tests 7/7, 4 escalated to the shell past the path guard, and the hash layer caught all 4), not by the idle subscription runs. The no-gate arm cheated only under adversarial framing (2/21). Net: agents seldom cheat here, *and* the lock holds when tested — two findings from two arms, not one 42-run proof of both.
 
 Two caveats belong next to those numbers, not in a footnote:
 - **Small sample.** n is 21 per cell; read [`docs/impossible-ac-results.md`](docs/impossible-ac-results.md) before quoting any figure.
