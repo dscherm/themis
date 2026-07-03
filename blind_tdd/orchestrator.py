@@ -292,6 +292,10 @@ class GreenPhaseResult:
     reason: str = ""
     green_report: dict = field(default_factory=dict)
     hash_match: bool = False
+    # True only when the seal comparison actually ran and found a modified
+    # test file — hash_match alone can't distinguish tampering from a spawn
+    # failure that never got as far as hashing.
+    hash_break: bool = False
     coverage: CoverageResult | None = None
     violations: list[dict] = field(default_factory=list)
     spawn_result: dict = field(default_factory=dict)
@@ -603,6 +607,7 @@ class BlindTddOrchestrator:
                 ),
                 green_report=green_report,
                 hash_match=False,
+                hash_break=True,
                 spawn_result=spawn_result,
                 violations=violations,
             )

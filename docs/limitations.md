@@ -76,6 +76,21 @@ sandbox against an adversary who already controls that process or can read its
 environment. For that, isolate the gate from the agent (run it host-side, outside
 the agent's sandbox).
 
+**What a caught break can and cannot do.** A hash break is detected after the
+tampering has already run — nothing at that point can contain the run that
+produced it. Themis therefore uses the break only as a learning signal: the
+event is recorded in `.themis/blind_tdd/tamper_ledger.jsonl`, and later runs of
+similar tasks (same task, same directory, shared tag) are escalated into the
+gate before anything spawns, even where selective routing would have skipped
+them (see the adoption guide's tamper-history section). The ledger is a plain
+project-tree file and a Bash-capable agent can delete it — but escalation is
+additive-only, so deletion just reverts to the human-set routing policy; it
+cannot un-gate anything the policy gates. Containment stronger than that (an
+OS-level sandbox around a run the ledger flags as adversarial) has to be a
+decision made from task metadata *before* the run starts, by the host — the
+ledger provides the signal (`blind_tdd.escalation.evaluate_escalation`); the
+sandbox itself is outside Themis's scope.
+
 ## Blindness is only as complete as its configuration
 
 The path guard denies reads of the paths it is told to deny (typically `src/`,

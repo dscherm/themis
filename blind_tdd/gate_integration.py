@@ -61,6 +61,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .artifacts import is_artifact_path
+from .escalation import (
+    KIND_SEAL_RECORD_TAMPERED,
+    KIND_TEST_HASH_BREAK,
+    evaluate_escalation,
+    record_tamper,
+)
 from .orchestrator import (
     BlindTddOrchestrator,
     GreenPhaseResult,
@@ -68,7 +74,7 @@ from .orchestrator import (
     RedPhaseResult,
 )
 from .preflight import preflight_task, MODE_OFF
-from .routing import evaluate_routing, normalize_routing
+from .routing import RoutingDecision, evaluate_routing, normalize_routing
 from .schema_validator import validate_task
 
 
@@ -484,6 +490,22 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
     # implementing agent — see routing.py's trust note. A non-selected task is
     # skipped here so an ordinary in-loop verifier can cover it.
     decision = evaluate_routing(task, btd_cfg["routing"])
+
+    # Tamper history feeds the next prediction: a hash break on an earlier run
+    # was recorded as evidence (see escalation.py), and a task similar to a
+    # tampered one is escalated here — gated even where the selective policy
+    # would skip it. Additive only: history can force the gate on, never off.
+    # The match is also surfaced in `details.tamper_escalation`, the pre-spawn
+    # signal a containment tier (an OS-level sandbox) would key off.
+    escalation = evaluate_escalation(task)
+    escalation_details = {"tamper_escalation": escalation.matched} if escalation.escalate else {}
+    if escalation.escalate and not decision.gate:
+        decision = RoutingDecision(
+            gate=True,
+            reason=f"escalated by tamper history: {escalation.reason}",
+            matched=escalation.matched,
+        )
+
     if not decision.gate:
         return BlindGateResult(
             passed=True,
@@ -595,6 +617,7 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
                 if red.coverage else [],
                 "needs_human_criteria": red.coverage.covered_by_triage if red.coverage else [],
                 "test_file_count": len(red.test_file_hashes),
+                **escalation_details,
             },
         )
 
@@ -604,6 +627,9 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
     # its recorded hash). No-op when records are unsigned (THEMIS_SEAL_KEY unset).
     seal_ok, seal_reason = verify_red_state_seal(red_state)
     if not seal_ok:
+        # Too late to contain this run — but excellent evidence for the next
+        # one: tasks like this get escalated by routing from here on.
+        record_tamper(task, KIND_SEAL_RECORD_TAMPERED, seal_reason)
         fail = btd_cfg["enforcement"] == "strict"
         return BlindGateResult(
             passed=not fail,
@@ -611,7 +637,7 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             message=f"seal record integrity check failed: {seal_reason}",
             reason="seal_tampered",
             task_id=task_id,
-            details={"seal_reason": seal_reason},
+            details={"seal_reason": seal_reason, **escalation_details},
         )
 
     red_result = _red_state_to_result(red_state)
@@ -626,6 +652,11 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
         )
 
     if not green.passed:
+        if green.hash_break:
+            # A sealed test's fingerprint changed between red and green. The
+            # run is already failed above; the record's job is the future —
+            # it feeds routing so similar tasks are escalated before spawn.
+            record_tamper(task, KIND_TEST_HASH_BREAK, green.reason)
         fail = btd_cfg["enforcement"] == "strict"
         return BlindGateResult(
             passed=not fail,
@@ -635,8 +666,10 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             task_id=task_id,
             details={
                 "hash_match": green.hash_match,
+                "hash_break": green.hash_break,
                 "violations": green.violations,
                 "green_report_summary": _summarize_green(green),
+                **escalation_details,
             },
         )
 
@@ -665,6 +698,7 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             "tests_passed": green.green_report.get("tests_passed"),
             "tests_failed": green.green_report.get("tests_failed"),
             "hash_match": True,
+            **escalation_details,
         },
     )
 

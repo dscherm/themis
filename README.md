@@ -65,6 +65,8 @@ Each layer covers a threat the one below it does not. The blind gate addresses a
 
 You can encode that "most tasks don't need this" line as policy instead of judgment: a **routing** block reserves the gate for the tasks that match it (by path glob, tag, severity, or keyword) and lets everything else fall through to an ordinary verifier. Set it once with `python -m blind_tdd.init` (or the `/blind-tdd:setup` plugin command) — the policy is human-set on purpose, because the trigger must be a rule the implementing agent can't choose to skip. See [`docs/adoption-guide.md`](docs/adoption-guide.md#routing--which-tasks-get-the-gate).
 
+The routing rule is also where detection feeds back into prediction. A hash break at green fails that run, but it can't do more than that — by the time the fingerprint mismatches, the tampering has already run. What the break *is* good for is learning: the gate records it in a tamper ledger (`.themis/blind_tdd/tamper_ledger.jsonl`), and on later runs a task similar to a previously tampered one — same task, same directory, shared tag — is escalated into the gate even where the selective policy would have skipped it. Escalation is additive-only: history can force the gate on, never off, so deleting the ledger merely reverts to the human-set base policy. The same match is exposed pre-spawn (`blind_tdd.escalation.evaluate_escalation`) as the signal a stricter containment tier — an OS-level sandbox around the whole run — would key off *before* any agent exists, rather than reacting to an attack already in progress.
+
 ## Quickstart
 
 ```bash

@@ -383,6 +383,130 @@ def test_red_state_round_trip():
             assert gi.load_red_state("t") is None
 
 
+def _pay_task(task_id: str, module: str, files: list[str], tags: list[str] | None = None) -> dict:
+    task = {
+        "id": task_id,
+        "title": f"Task {task_id}",
+        "passes": False,
+        "files": files,
+        "public_surface": {"module": module, "adds": ["do_thing"]},
+        "acceptance_criteria": [
+            {
+                "id": "AC-1",
+                "given": "a foo object",
+                "when": "do_thing is called",
+                "then": "do_thing returns True",
+            },
+        ],
+    }
+    if tags:
+        task["tags"] = tags
+    return task
+
+
+def test_hash_break_feeds_escalation_for_next_run():
+    """Detection on run N feeds the prediction for run N+1: a hash break on a
+    gated task escalates a similar task that selective routing would skip."""
+    tampered = _pay_task("task-pay-1", "src.pay.charge", ["src/pay/charge.py"], tags=["gate-me"])
+    neighbor = _pay_task("task-pay-2", "src.pay.refund", ["src/pay/refund.py"])
+    unrelated = _pay_task("task-docs-1", "docs_tools.gen", ["docs_tools/gen.py"])
+    config = {"gate": {"blind_tdd": {"enabled": True, "routing": {"tags": ["gate-me"]}}}}
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [tampered, neighbor, unrelated])
+        with _chdir(p):
+            # Green phase for the gated task catches a broken seal.
+            gi.save_red_state(
+                "task-pay-1",
+                RedPhaseResult(passed=True, test_file_hashes={"tests/contracts/t.py": "abc"},
+                               triage_report={}),
+            )
+            stub = _StubOrchestrator(
+                green_result=GreenPhaseResult(
+                    passed=False,
+                    reason="test file integrity compromised: 1 file(s) modified",
+                    green_report={"overall": "fail"},
+                    hash_match=False,
+                    hash_break=True,
+                ),
+            )
+            original = _install_stub_orch(stub)
+            try:
+                os.environ["RALPH_BLIND_TDD_TASK"] = "task-pay-1"
+                result = gi.run_blind_tdd_gate(config)
+            finally:
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+                _restore(original)
+            assert not result.passed
+            assert result.details.get("hash_break") is True
+            assert (p / ".themis" / "blind_tdd" / "tamper_ledger.jsonl").exists()
+
+            # The neighbor task carries no routing tag — without the ledger it
+            # would be skipped. Tamper history escalates it into the gate.
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(
+                    passed=True, reason="red ok",
+                    test_file_hashes={"tests/contracts/t2.py": "def"},
+                    triage_report={},
+                ),
+            )
+            original = _install_stub_orch(stub)
+            try:
+                os.environ["RALPH_BLIND_TDD_TASK"] = "task-pay-2"
+                result = gi.run_blind_tdd_gate(config)
+            finally:
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+                _restore(original)
+            assert result.phase == "red"
+            assert stub.red_called
+            assert result.details.get("tamper_escalation")
+
+            # An unrelated task is untouched by the ledger and still skips.
+            try:
+                os.environ["RALPH_BLIND_TDD_TASK"] = "task-docs-1"
+                result = gi.run_blind_tdd_gate(config)
+            finally:
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+            assert result.phase == "skipped"
+            assert result.reason == "routing_excluded"
+
+
+def test_seal_record_tamper_is_recorded():
+    """A forged red-state record (HMAC mismatch) also lands in the ledger."""
+    task = _pay_task("task-pay-3", "src.pay.audit", ["src/pay/audit.py"])
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [task])
+        with _chdir(p):
+            os.environ["THEMIS_SEAL_KEY"] = "test-key"
+            os.environ["RALPH_BLIND_TDD_TASK"] = "task-pay-3"
+            try:
+                gi.save_red_state(
+                    "task-pay-3",
+                    RedPhaseResult(passed=True, test_file_hashes={"t.py": "abc"},
+                                   triage_report={}),
+                )
+                # Forge the baseline the way a Bash-capable implementer would.
+                state_path = p / ".themis" / "blind_tdd" / "red_state" / "task-pay-3.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["test_file_hashes"] = {"t.py": "forged"}
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+
+                result = gi.run_blind_tdd_gate({"gate": {"blind_tdd": {"enabled": True}}})
+            finally:
+                os.environ.pop("THEMIS_SEAL_KEY", None)
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+
+            assert not result.passed
+            assert result.reason == "seal_tampered"
+            ledger = (p / ".themis" / "blind_tdd" / "tamper_ledger.jsonl")
+            assert ledger.exists()
+            record = json.loads(ledger.read_text(encoding="utf-8").strip())
+            assert record["kind"] == "seal_record_tampered"
+            assert record["task_id"] == "task-pay-3"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -403,6 +527,8 @@ def _run_all() -> int:
         test_invalid_task_fails_strict,
         test_invalid_task_warns_but_passes,
         test_red_state_round_trip,
+        test_hash_break_feeds_escalation_for_next_run,
+        test_seal_record_tamper_is_recorded,
     ]
     failed = 0
     for t in tests:
