@@ -43,6 +43,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .artifacts import is_artifact_path
+
 
 # Matches `Covers: AC-1` or `Covers: AC-1, AC-2` or `Covers: AC-1 AC-2`
 _COVERS_PATTERN = re.compile(
@@ -224,6 +226,10 @@ def extract_covers(test_dir: Path | str) -> list[TestAnnotation]:
     results: list[TestAnnotation] = []
     for path in sorted(test_dir.rglob("*")):
         if not path.is_file():
+            continue
+        if is_artifact_path(path):
+            # Never mine coverage annotations from bytecode caches or vendored
+            # deps (e.g. a `Covers: AC-1` string inside node_modules).
             continue
         suffix = path.suffix.lower()
         if suffix == ".py":

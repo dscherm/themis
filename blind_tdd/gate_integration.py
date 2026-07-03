@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .artifacts import is_artifact_path
 from .orchestrator import (
     BlindTddOrchestrator,
     GreenPhaseResult,
@@ -697,7 +698,10 @@ def _run_quality_review_phase(
     for td in test_dirs:
         d = Path(td)
         if d.is_dir():
-            test_files.extend(p for p in d.rglob("test_*.py") if p.is_file())
+            test_files.extend(
+                p for p in d.rglob("test_*.py")
+                if p.is_file() and not is_artifact_path(p)
+            )
     public_module = (task.get("public_surface") or {}).get("module")
     src_files: list[Path] = []
     if public_module:

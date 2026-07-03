@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .artifacts import is_artifact_path
 from .coverage import verify_coverage, CoverageResult
 from .schema_validator import validate_task, ValidationResult
 from .session import blind_session, get_audit_log, audit_violations
@@ -73,6 +74,10 @@ def _hash_test_files(test_dirs: list[Path]) -> dict[str, str]:
             continue
         for path in sorted(td.rglob("*")):
             if not path.is_file():
+                continue
+            if is_artifact_path(path):
+                # A .pyc/__pycache__/node_modules/NUL artifact appearing in a
+                # locked test dir must not change the sealed hash set.
                 continue
             if path.suffix.lower() not in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs"):
                 continue
