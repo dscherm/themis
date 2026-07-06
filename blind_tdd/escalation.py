@@ -41,6 +41,11 @@ LEDGER_PATH = Path(".themis") / "blind_tdd" / "tamper_ledger.jsonl"
 # Recorded event kinds.
 KIND_TEST_HASH_BREAK = "test_hash_break"        # a sealed test's fingerprint changed
 KIND_SEAL_RECORD_TAMPERED = "seal_record_tampered"  # the baseline record's HMAC failed
+# A lint/security suppression comment (# noqa, # nosec, eslint-disable, ...)
+# appeared during the implementation window — check-evasion evidence, one layer
+# over from test tampering. Advisory at the run that finds it (see
+# suppression.py); its escalation weight here is the same as any other record.
+KIND_SUPPRESSION_INTRODUCED = "suppression_marker_introduced"
 
 
 @dataclass
