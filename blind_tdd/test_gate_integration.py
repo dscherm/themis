@@ -74,13 +74,17 @@ class _StubOrchestrator:
         self.green_result = green_result
         self.red_called = False
         self.green_called = False
+        self.red_task = None
+        self.green_task = None
 
     def run_red_phase(self, task):
         self.red_called = True
+        self.red_task = task
         return self.red_result
 
     def run_green_phase(self, task, red_result):
         self.green_called = True
+        self.green_task = task
         return self.green_result
 
 
@@ -508,6 +512,296 @@ def test_seal_record_tamper_is_recorded():
 
 
 # ---------------------------------------------------------------------------
+# Suppression audit (advisory)
+# ---------------------------------------------------------------------------
+
+def _green_pass_stub() -> _StubOrchestrator:
+    return _StubOrchestrator(
+        green_result=GreenPhaseResult(
+            passed=True, reason="green ok",
+            green_report={"overall": "pass", "tests_passed": 1, "tests_failed": 0},
+            hash_match=True,
+        ),
+    )
+
+
+def _run_gate(task_id: str, config: dict, stub: _StubOrchestrator):
+    original = _install_stub_orch(stub)
+    try:
+        os.environ["RALPH_BLIND_TDD_TASK"] = task_id
+        return gi.run_blind_tdd_gate(config)
+    finally:
+        os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+        _restore(original)
+
+
+def test_red_saves_suppression_baseline_by_default():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        (p / "src").mkdir()
+        (p / "src" / "existing.py").write_text("x = 1  # noqa\n", encoding="utf-8")
+        with _chdir(p):
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate("task-test-1", {"gate": {"blind_tdd": {"enabled": True}}}, stub)
+            assert result.passed and result.phase == "red"
+            state = gi.load_red_state("task-test-1")
+            assert state["suppression_baseline"] == {"src/existing.py": {"noqa": 1}}
+
+
+def test_suppression_audit_disabled_skips_baseline():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate(
+                "task-test-1",
+                {"gate": {"blind_tdd": {"enabled": True, "suppression_audit": False}}},
+                stub,
+            )
+            assert result.passed
+            state = gi.load_red_state("task-test-1")
+            assert "suppression_baseline" not in state
+
+
+def test_suppression_introduced_is_advisory_and_recorded():
+    """A marker appearing during implementation warns and feeds the ledger —
+    it never fails the run."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            gi.save_red_state(
+                "task-test-1",
+                RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+                suppression_baseline={},
+            )
+            # The "implementer" adds a masked secret during the window.
+            (p / "src").mkdir()
+            (p / "src" / "evil.py").write_text(
+                'PASSWORD = "hunter2"  # nosec\n', encoding="utf-8",
+            )
+            result = _run_gate(
+                "task-test-1", {"gate": {"blind_tdd": {"enabled": True}}}, _green_pass_stub(),
+            )
+            assert result.passed  # advisory — the run still passes
+            assert result.phase == "green"
+            assert "WARNING" in result.message and "nosec" in result.message
+            findings = result.details.get("suppression_findings")
+            assert findings and findings[0]["path"] == "src/evil.py"
+            assert findings[0]["marker"] == "nosec"
+
+            ledger = p / ".themis" / "blind_tdd" / "tamper_ledger.jsonl"
+            record = json.loads(ledger.read_text(encoding="utf-8").strip())
+            assert record["kind"] == "suppression_marker_introduced"
+            assert record["task_id"] == "task-test-1"
+
+
+def test_preexisting_suppressions_not_flagged():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            (p / "src").mkdir()
+            (p / "src" / "old.py").write_text("x = 1  # noqa\n", encoding="utf-8")
+            gi.save_red_state(
+                "task-test-1",
+                RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+                suppression_baseline={"src/old.py": {"noqa": 1}},
+            )
+            result = _run_gate(
+                "task-test-1", {"gate": {"blind_tdd": {"enabled": True}}}, _green_pass_stub(),
+            )
+            assert result.passed
+            assert "suppression_findings" not in result.details
+            assert "WARNING" not in result.message
+            assert not (p / ".themis" / "blind_tdd" / "tamper_ledger.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# Security AC pack
+# ---------------------------------------------------------------------------
+
+_TEST_PACK = {
+    "version": 1,
+    "criteria": [
+        {
+            "category": "input-validation",
+            "given": "a public entry point",
+            "when": "do_thing is called with oversized input",
+            "then": "the call raises ValueError",
+        },
+    ],
+}
+
+
+def _write_pack(p: Path, pack: dict) -> Path:
+    pack_path = p / "my_pack.json"
+    pack_path.write_text(json.dumps(pack), encoding="utf-8")
+    return pack_path
+
+
+def _pack_config(pack_path: Path, match: dict | None = None) -> dict:
+    sp = {"enabled": True, "pack_path": str(pack_path)}
+    if match is not None:
+        sp["match"] = match
+    return {"gate": {"blind_tdd": {"enabled": True, "security_ac_pack": sp}}}
+
+
+def test_security_pack_applied_at_red():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            pack_path = _write_pack(p, _TEST_PACK)
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate("task-test-1", _pack_config(pack_path), stub)
+            assert result.passed and result.phase == "red"
+
+            # The writer saw the augmented task: pack AC continues numbering.
+            ids = [c["id"] for c in stub.red_task["acceptance_criteria"]]
+            assert ids == ["AC-1", "AC-2"]
+            assert "[themis-security-pack v1: input-validation]" in \
+                stub.red_task["acceptance_criteria"][1]["notes"]
+
+            # The pack fingerprint is sealed into red state.
+            state = gi.load_red_state("task-test-1")
+            assert state["security_pack"]["injected_ids"] == ["AC-2"]
+            assert state["security_pack"]["fingerprint"]
+
+
+def test_security_pack_change_between_red_and_green_fails():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            pack_path = _write_pack(p, _TEST_PACK)
+            config = _pack_config(pack_path)
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            assert _run_gate("task-test-1", config, stub).passed
+
+            # Someone weakens the pack during the implementation window.
+            weakened = json.loads(json.dumps(_TEST_PACK))
+            weakened["criteria"][0]["then"] = "the call returns True"
+            pack_path.write_text(json.dumps(weakened), encoding="utf-8")
+
+            result = _run_gate("task-test-1", config, _green_pass_stub())
+            assert not result.passed
+            assert result.reason == "security_pack_changed"
+            # Red state survives so the operator can restore the pack or restart.
+            assert gi.load_red_state("task-test-1") is not None
+
+
+def test_security_pack_desync_when_task_acs_change_mid_task():
+    """Same pack, but the task grew an AC between red and green → the pack
+    criteria renumber. That must fail with a specific reason, not a baffling
+    coverage gap."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            pack_path = _write_pack(p, _TEST_PACK)
+            config = _pack_config(pack_path)
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            assert _run_gate("task-test-1", config, stub).passed
+            state = gi.load_red_state("task-test-1")
+            assert state["security_pack"]["injected_ids"] == ["AC-2"]
+
+            # The task's own criteria change during the implementation window:
+            # the pack criterion would now be numbered AC-3, not the sealed AC-2.
+            grown = json.loads(json.dumps(VALID_TASK))
+            grown["acceptance_criteria"].append({
+                "id": "AC-2", "given": "g", "when": "do_thing is called again",
+                "then": "do_thing returns False",
+            })
+            _write_plan(p, [grown])
+
+            result = _run_gate("task-test-1", config, _green_pass_stub())
+            assert not result.passed
+            assert result.reason == "security_pack_desynced"
+            assert result.details["sealed_injected_ids"] == ["AC-2"]
+            assert result.details["current_injected_ids"] == ["AC-3"]
+
+
+def test_security_pack_match_predicates_scope_injection():
+    """A task not matching the pack's predicates gets no pack ACs."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])  # VALID_TASK has no tags
+        with _chdir(p):
+            pack_path = _write_pack(p, _TEST_PACK)
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate(
+                "task-test-1", _pack_config(pack_path, match={"tags": ["security"]}), stub,
+            )
+            assert result.passed and result.phase == "red"
+            ids = [c["id"] for c in stub.red_task["acceptance_criteria"]]
+            assert ids == ["AC-1"]  # nothing injected
+            state = gi.load_red_state("task-test-1")
+            assert "security_pack" not in state
+
+
+def test_stale_pack_nudges_but_never_blocks():
+    """A 90+ day old pack file logs an alert and warns — the run proceeds."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            pack_path = _write_pack(p, _TEST_PACK)
+            ninety_one_days_ago = __import__("time").time() - 91 * 86400
+            os.utime(pack_path, (ninety_one_days_ago, ninety_one_days_ago))
+
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate("task-test-1", _pack_config(pack_path), stub)
+            assert result.passed and result.phase == "red"  # nudge is never fatal
+            alerts = p / ".themis" / "alerts.log"
+            assert alerts.exists()
+            assert "security AC pack stale" in alerts.read_text(encoding="utf-8")
+
+            # Throttled: the very next invocation (green) must not re-log.
+            result = _run_gate("task-test-1", _pack_config(pack_path), _green_pass_stub())
+            assert result.passed
+            stale_lines = [
+                line for line in alerts.read_text(encoding="utf-8").splitlines()
+                if "security AC pack stale" in line
+            ]
+            assert len(stale_lines) == 1
+
+
+def test_security_pack_missing_file_fails_loudly_in_strict():
+    """A silently skipped pack would fail open — strict mode errors instead."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(passed=True, test_file_hashes={}, triage_report={}),
+            )
+            result = _run_gate(
+                "task-test-1", _pack_config(p / "missing_pack.json"), stub,
+            )
+            assert not result.passed
+            assert result.phase == "error"
+            assert result.reason == "security_pack_invalid"
+            assert not stub.red_called  # no API budget spent on a broken config
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -529,6 +823,16 @@ def _run_all() -> int:
         test_red_state_round_trip,
         test_hash_break_feeds_escalation_for_next_run,
         test_seal_record_tamper_is_recorded,
+        test_red_saves_suppression_baseline_by_default,
+        test_suppression_audit_disabled_skips_baseline,
+        test_suppression_introduced_is_advisory_and_recorded,
+        test_preexisting_suppressions_not_flagged,
+        test_security_pack_applied_at_red,
+        test_security_pack_change_between_red_and_green_fails,
+        test_security_pack_desync_when_task_acs_change_mid_task,
+        test_security_pack_match_predicates_scope_injection,
+        test_stale_pack_nudges_but_never_blocks,
+        test_security_pack_missing_file_fails_loudly_in_strict,
     ]
     failed = 0
     for t in tests:

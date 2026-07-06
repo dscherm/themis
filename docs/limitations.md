@@ -21,6 +21,21 @@ language (`smoothly`, `properly`) is flagged — but it cannot judge whether the
 criteria describe the *right* behavior. Garbage spec, garbage oracle. Spec
 review remains a human responsibility upstream of the gate.
 
+The **security AC pack** (`security_ac_pack` config) narrows this hole for one
+domain: it appends operator-authored security criteria (input rejection, no
+hardcoded secrets, sanitized error surfaces, ...) to matching tasks the spec
+author forgot to secure. Two limits keep it from being a fix. First, **generic
+criteria derive weaker tests than task-specific ones** — a pack criterion
+written against "any public entry point" depends on the blind writer
+instantiating it concretely, and a lazy instantiation is exactly the
+weak-but-honest test the mutation pass exists to catch; if you enable the pack,
+point `blind_tdd.mutate` at the pack-derived tests. Second, the pack just
+*moves* spec responsibility, it doesn't remove it: the pack file is spec
+content on the operator's side of the trust boundary — version it, review
+changes to it like spec changes, and never let the implementing agent edit it
+(the gate fingerprints it at red and fails green if it changed mid-task, but a
+bad pack reviewed by nobody earns the same confident pass as a bad spec).
+
 ## Test strength is not measured
 
 The gate enforces a test's *independence* (written without sight of the
@@ -75,6 +90,19 @@ one key. Themis still assumes the gate's own process is trusted; it is not a
 sandbox against an adversary who already controls that process or can read its
 environment. For that, isolate the gate from the agent (run it host-side, outside
 the agent's sandbox).
+
+**The suppression audit is advisory and lexical.** The related
+suppression-marker audit (baseline at red, diff at green) spots check-evasion
+comments (`# noqa`, `# nosec`, `eslint-disable`, ...) introduced during the
+implementation window, but by design it never fails a run — it warns and feeds
+the tamper ledger. It is also a lexical scan, not a semantic one: an agent
+that evades a linter some other way (restructuring code so the rule doesn't
+fire, editing the linter's config file) is invisible to it. It closes the
+most-documented masking move, not the category. One more boundary: the
+baseline is captured *after* the writer runs (so the writer's own test-file
+markers aren't false-flagged), which means markers planted in source files
+during the red window would enter the baseline unflagged — that requires an
+adversarial *writer*, which already defeats the gate's premise.
 
 **What a caught break can and cannot do.** A hash break is detected after the
 tampering has already run — nothing at that point can contain the run that

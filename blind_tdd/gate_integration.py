@@ -63,10 +63,19 @@ from pathlib import Path
 from .artifacts import is_artifact_path
 from .escalation import (
     KIND_SEAL_RECORD_TAMPERED,
+    KIND_SUPPRESSION_INTRODUCED,
     KIND_TEST_HASH_BREAK,
     evaluate_escalation,
     record_tamper,
 )
+from .security_pack import (
+    apply_pack,
+    load_pack,
+    normalize_pack_config,
+    pack_fingerprint,
+    resolve_pack_path,
+)
+from .suppression import diff_suppressions, scan_repo, summarize_findings
 from .orchestrator import (
     BlindTddOrchestrator,
     GreenPhaseResult,
@@ -105,6 +114,12 @@ def get_blind_tdd_config(config: dict) -> dict:
         "spawn_timeout_seconds": int(raw.get("spawn_timeout_seconds", 1800)),
         "preflight": str(raw.get("preflight", "strict")),
         "routing": normalize_routing(raw.get("routing")),
+        # Advisory suppression-marker audit (see suppression.py). Default ON:
+        # it never fails a run, it only warns and feeds the tamper ledger.
+        "suppression_audit": bool(raw.get("suppression_audit", True)),
+        # Operator-authored security acceptance criteria appended to matching
+        # tasks before the writer spawn (see security_pack.py). Default OFF.
+        "security_ac_pack": normalize_pack_config(raw.get("security_ac_pack")),
     }
 
 
@@ -271,10 +286,31 @@ def _seal_key() -> bytes | None:
     return raw.encode("utf-8") if raw else None
 
 
-def _seal_signature(task_id: str, test_file_hashes: dict, key: bytes) -> str:
-    """Deterministic HMAC-SHA256 over the task id + its sealed test hashes."""
+# Red-state keys beyond the test hashes that the HMAC also covers when
+# present. Signing them closes the same re-seal hole for the suppression
+# baseline (an implementer pre-dating its own markers) and the security-pack
+# fingerprint (an implementer pointing the record at a weakened pack).
+_SEAL_EXTRA_KEYS = ("suppression_baseline", "security_pack")
+
+
+def _seal_extras(state: dict) -> dict:
+    return {k: state[k] for k in _SEAL_EXTRA_KEYS if k in state}
+
+
+def _seal_signature(
+    task_id: str, test_file_hashes: dict, key: bytes, extras: dict | None = None,
+) -> str:
+    """Deterministic HMAC-SHA256 over the task id + its sealed test hashes.
+
+    `extras` (suppression baseline, security-pack record) are folded in only
+    when present, so records written before those fields existed still verify
+    against the original two-field payload.
+    """
+    payload_obj: dict = {"task_id": task_id, "test_file_hashes": test_file_hashes}
+    if extras:
+        payload_obj["extras"] = extras
     payload = json.dumps(
-        {"task_id": task_id, "test_file_hashes": test_file_hashes},
+        payload_obj,
         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
@@ -284,7 +320,9 @@ def verify_red_state_seal(state: dict) -> tuple[bool, str]:
     """Check a loaded red-state record's HMAC before its baseline is trusted.
 
     Returns (ok, reason). Fail-closed: if a record carries a signature but no key
-    is available to check it, the seal is NOT trusted.
+    is available to check it, the seal is NOT trusted. Deleting a signed extras
+    field (e.g. the suppression baseline) also fails: the recomputed payload no
+    longer matches the stored signature.
     """
     stored = state.get("seal_hmac")
     key = _seal_key()
@@ -296,13 +334,20 @@ def verify_red_state_seal(state: dict) -> tuple[bool, str]:
                        "verify it — refusing to trust the baseline")
     expected = _seal_signature(
         state.get("task_id", ""), state.get("test_file_hashes") or {}, key,
+        extras=_seal_extras(state),
     )
     if hmac.compare_digest(expected, str(stored)):
         return True, "seal verified"
     return False, "red-state HMAC mismatch — the seal record was modified"
 
 
-def save_red_state(task_id: str, result: RedPhaseResult) -> None:
+def save_red_state(
+    task_id: str,
+    result: RedPhaseResult,
+    *,
+    suppression_baseline: dict | None = None,
+    security_pack: dict | None = None,
+) -> None:
     p = _red_state_path(task_id)
     p.parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -312,9 +357,15 @@ def save_red_state(task_id: str, result: RedPhaseResult) -> None:
         "triage_report": result.triage_report,
         "spawn_agent_id": (result.spawn_result or {}).get("agent_id"),
     }
+    if suppression_baseline is not None:
+        state["suppression_baseline"] = suppression_baseline
+    if security_pack is not None:
+        state["security_pack"] = security_pack
     key = _seal_key()
     if key is not None:
-        state["seal_hmac"] = _seal_signature(task_id, result.test_file_hashes, key)
+        state["seal_hmac"] = _seal_signature(
+            task_id, result.test_file_hashes, key, extras=_seal_extras(state),
+        )
     p.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -457,6 +508,60 @@ def _check_warn_mode_staleness(btd_cfg: dict) -> None:
         pass
 
 
+PACK_STALE_DAYS = 90
+# A stale pack is checked on every gate invocation; without a throttle it
+# would re-print and re-log each run. One nudge per interval is enough.
+PACK_NUDGE_INTERVAL_DAYS = 7
+
+
+def _check_pack_staleness(pack_path: Path) -> None:
+    """Nudge (stderr + alerts.log, never fatal) when the security pack file
+    hasn't been touched in PACK_STALE_DAYS. A tailored pack rots as the
+    codebase grows new entry points and sinks — the fix is re-running the
+    pack interview (`/blind-tdd:security-pack-setup`), same spirit as the
+    warn-mode staleness check above. Throttled via a marker file so a stale
+    pack nudges once per PACK_NUDGE_INTERVAL_DAYS, not once per run."""
+    import time as _time
+
+    try:
+        age_days = (_time.time() - pack_path.stat().st_mtime) / 86400
+    except OSError:
+        return
+    if age_days < PACK_STALE_DAYS:
+        return
+
+    marker = Path(".themis") / "blind_tdd" / "pack_stale_nudged.json"
+    now = _time.time()
+    try:
+        last = float(json.loads(marker.read_text(encoding="utf-8"))["last_nudge"])
+        if (now - last) / 86400 < PACK_NUDGE_INTERVAL_DAYS:
+            return
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass  # no/corrupt marker → nudge and (re)write it
+
+    msg = (
+        f"⚠ security AC pack {pack_path} is {int(age_days)} days old.\n"
+        f"  New entry points and sinks added since then aren't covered by "
+        f"its criteria.\n"
+        f"  Re-run the pack interview (/blind-tdd:security-pack-setup or "
+        f"python -m blind_tdd.pack_wizard) to refresh it."
+    )
+    print(msg, file=sys.stderr)
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state_dir = Path(".themis")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(state_dir / "alerts.log", "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] security AC pack stale ({int(age_days)}d): {pack_path}\n")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps({"last_nudge": now, "pack_path": str(pack_path)}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def run_blind_tdd_gate(config: dict) -> BlindGateResult:
     """Run the appropriate blind-TDD phase for the current task.
 
@@ -515,6 +620,40 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             task_id=task_id,
             details={"routing_reason": decision.reason, "source": source},
         )
+
+    # Security AC pack: append the operator-authored security criteria to a
+    # matching task BEFORE anything downstream sees it — the writer derives
+    # sealed tests for them, and the green coverage check holds the
+    # implementation to them. Applied identically on the red and green
+    # invocations (same task + same pack → same augmented task), with the
+    # pack fingerprint recorded in red state so a pack that changes mid-task
+    # fails green with a specific reason instead of a confusing coverage gap.
+    pack_record: dict | None = None
+    sp_cfg = btd_cfg["security_ac_pack"]
+    if sp_cfg["enabled"]:
+        pack_match = evaluate_routing(task, sp_cfg["match"])
+        if pack_match.gate:
+            pack_path = resolve_pack_path(sp_cfg["pack_path"], btd_cfg.get("themis_home"))
+            pack, pack_err = load_pack(pack_path)
+            if pack is None:
+                # Fail loudly: silently skipping would quietly drop the
+                # security criteria the operator asked for (fail-open).
+                fail = btd_cfg["enforcement"] == "strict"
+                return BlindGateResult(
+                    passed=not fail,
+                    phase="error",
+                    message=f"security AC pack enabled but unusable: {pack_err}",
+                    reason="security_pack_invalid",
+                    task_id=task_id,
+                    details={"pack_path": str(pack_path), "source": source},
+                )
+            _check_pack_staleness(pack_path)
+            task, injected_ids = apply_pack(task, pack)
+            pack_record = {
+                "fingerprint": pack_fingerprint(pack),
+                "version": pack.get("version"),
+                "injected_ids": injected_ids,
+            }
 
     # Validate the task spec before spending API budget on an agent spawn.
     vr = validate_task(task)
@@ -602,7 +741,15 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
                 },
             )
 
-        save_red_state(task_id, red)
+        # Baseline the repo's suppression markers at seal time — the green
+        # phase diffs against this to spot markers introduced during the
+        # implementation window (advisory; see suppression.py).
+        suppression_baseline = scan_repo() if btd_cfg["suppression_audit"] else None
+        save_red_state(
+            task_id, red,
+            suppression_baseline=suppression_baseline,
+            security_pack=pack_record,
+        )
 
         return BlindGateResult(
             passed=True, phase="red",
@@ -640,6 +787,59 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             details={"seal_reason": seal_reason, **escalation_details},
         )
 
+    # The pack in effect now must be the pack in effect at red — the sealed
+    # tests were derived from it. A mismatch in either direction (changed,
+    # newly enabled, or disabled mid-task) invalidates the red baseline.
+    recorded_fp = (red_state.get("security_pack") or {}).get("fingerprint")
+    current_fp = (pack_record or {}).get("fingerprint")
+    if recorded_fp != current_fp:
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="green",
+            message=(
+                "security AC pack changed between red and green phases "
+                f"(sealed fingerprint {recorded_fp!r}, current {current_fp!r}). "
+                "Restore the pack/config in effect at red, or clear "
+                f"{_red_state_path(task_id)} to restart the task from red."
+            ),
+            reason="security_pack_changed",
+            task_id=task_id,
+            details={
+                "sealed_pack_fingerprint": recorded_fp,
+                "current_pack_fingerprint": current_fp,
+                **escalation_details,
+            },
+        )
+
+    # Same pack, but the task's own ACs changed mid-task → the pack criteria
+    # renumber (a sealed test says `Covers: AC-4`, the augmented task now calls
+    # it AC-5). That would surface as a baffling coverage gap; catch it here
+    # with a specific reason instead. injected_ids is HMAC-covered with the
+    # rest of the security_pack record.
+    recorded_ids = (red_state.get("security_pack") or {}).get("injected_ids")
+    current_ids = (pack_record or {}).get("injected_ids")
+    if recorded_ids != current_ids:
+        fail = btd_cfg["enforcement"] == "strict"
+        return BlindGateResult(
+            passed=not fail,
+            phase="green",
+            message=(
+                "security-pack criteria renumbered between red and green "
+                f"(sealed ids {recorded_ids!r}, current {current_ids!r}) — the "
+                "task's own acceptance_criteria changed after the tests were "
+                "sealed. Restore the task spec, or clear "
+                f"{_red_state_path(task_id)} to restart the task from red."
+            ),
+            reason="security_pack_desynced",
+            task_id=task_id,
+            details={
+                "sealed_injected_ids": recorded_ids,
+                "current_injected_ids": current_ids,
+                **escalation_details,
+            },
+        )
+
     red_result = _red_state_to_result(red_state)
     try:
         green = orch.run_green_phase(task, red_result)
@@ -673,6 +873,24 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             },
         )
 
+    # Advisory suppression audit: markers introduced during the implementation
+    # window warn on this result and land in the tamper ledger (feeding the
+    # next run's escalation) — they never fail this run. See suppression.py.
+    suppression_details: dict = {}
+    suppression_warning = ""
+    baseline = red_state.get("suppression_baseline")
+    if btd_cfg["suppression_audit"] and isinstance(baseline, dict):
+        findings = diff_suppressions(baseline, scan_repo())
+        if findings:
+            summary = summarize_findings(findings)
+            record_tamper(task, KIND_SUPPRESSION_INTRODUCED, summary)
+            suppression_details = {"suppression_findings": findings}
+            suppression_warning = (
+                f" WARNING (advisory): {len(findings)} lint/security suppression "
+                f"marker(s) introduced during implementation — recorded to the "
+                f"tamper ledger: {summary}"
+            )
+
     # Green pass → clear red state so the next task starts fresh
     clear_red_state(task_id)
 
@@ -691,7 +909,7 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
         message=(
             f"green phase passed for task {task_id!r}: "
             f"{green.green_report.get('tests_passed', 0)} test(s) passing, "
-            f"coverage verified."
+            f"coverage verified." + suppression_warning
         ),
         task_id=task_id,
         details={
@@ -699,6 +917,7 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             "tests_failed": green.green_report.get("tests_failed"),
             "hash_match": True,
             **escalation_details,
+            **suppression_details,
         },
     )
 

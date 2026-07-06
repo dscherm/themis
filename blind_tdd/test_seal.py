@@ -71,6 +71,59 @@ def test_wrong_key_fails_verification(monkeypatch):
     assert not ok
 
 
+def test_extras_signed_roundtrip(tmp_path, monkeypatch):
+    """Suppression baseline + pack record ride under the same HMAC."""
+    monkeypatch.setenv(gi.SEAL_KEY_ENV, _KEY)
+    monkeypatch.chdir(tmp_path)
+    gi.save_red_state(
+        "t1", _fake_red({"tests/a.py": "h1"}),
+        suppression_baseline={"src/app.py": {"noqa": 1}},
+        security_pack={"fingerprint": "fp1", "version": 1, "injected_ids": ["AC-2"]},
+    )
+    state = gi.load_red_state("t1")
+    assert state["suppression_baseline"] == {"src/app.py": {"noqa": 1}}
+    ok, reason = gi.verify_red_state_seal(state)
+    assert ok, reason
+
+
+def test_tampered_suppression_baseline_fails(tmp_path, monkeypatch):
+    """An implementer pre-dating its own markers into the baseline is caught."""
+    monkeypatch.setenv(gi.SEAL_KEY_ENV, _KEY)
+    monkeypatch.chdir(tmp_path)
+    gi.save_red_state(
+        "t1", _fake_red({"tests/a.py": "h1"}),
+        suppression_baseline={},
+    )
+    state = gi.load_red_state("t1")
+    state["suppression_baseline"] = {"src/app.py": {"nosec": 5}}
+    ok, reason = gi.verify_red_state_seal(state)
+    assert not ok and "mismatch" in reason
+
+
+def test_deleting_signed_extras_fails(tmp_path, monkeypatch):
+    """Dropping a signed extras field changes the payload — fail-closed."""
+    monkeypatch.setenv(gi.SEAL_KEY_ENV, _KEY)
+    monkeypatch.chdir(tmp_path)
+    gi.save_red_state(
+        "t1", _fake_red({"tests/a.py": "h1"}),
+        security_pack={"fingerprint": "fp1", "version": 1, "injected_ids": []},
+    )
+    state = gi.load_red_state("t1")
+    del state["security_pack"]
+    ok, _ = gi.verify_red_state_seal(state)
+    assert not ok
+
+
+def test_old_two_field_records_still_verify(monkeypatch):
+    """Back-compat: a record signed before extras existed uses the original
+    two-field payload and must keep verifying."""
+    sig = gi._seal_signature("t1", {"tests/a.py": "h1"}, _KEY.encode())
+    state = {"task_id": "t1", "test_file_hashes": {"tests/a.py": "h1"}, "seal_hmac": sig}
+    monkeypatch.setenv(gi.SEAL_KEY_ENV, _KEY)
+    ok, reason = gi.verify_red_state_seal(state)
+    assert ok, reason
+
+
 def test_spawner_strips_seal_key():
     # The key must never reach a spawned agent, regardless of auth mode.
     env = subscription_env({"THEMIS_SEAL_KEY": "secret", "FOO": "bar"}, strip_api_key=False)
