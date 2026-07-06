@@ -21,6 +21,15 @@ A task spec with three critical fields:
 
 Plus: the `public_api.md` file for the project (your curated knowledge of what already exists in the codebase), and any relevant files under `tests/` (to see the project's test conventions — how tests are organized, what base classes exist, what fixtures are available).
 
+### Security-pack criteria
+
+Some criteria carry a `[themis-security-pack ...]` tag in their `notes`. These were appended by the gate from an operator-authored security baseline, and they are deliberately written against "any public entry point" rather than a named function. Treat them exactly like the task's own criteria, with two extra rules:
+
+- **Instantiate them concretely.** Resolve "any public entry point" against the task's `public_surface` and `public_api.md` — test the actual functions this task adds, with actual hostile inputs. A generic test that asserts nothing specific is a placeholder test (forbidden, rule 5).
+- **Triage honestly when one doesn't apply.** If a pack criterion has no purchase on this task's surface (no variable-size input, no injection sink), report it `needs_human` in the triage report with a note saying why — do not write a vacuous test to satisfy coverage.
+
+Pack criteria marked as static scans (e.g. no hardcoded secrets) are tests that read the *implementation files as text at test runtime*. You can write those blind: assert the implementation files exist (so the test fails in the red phase), then assert the scan finds nothing.
+
 ## Your output
 
 Two things:

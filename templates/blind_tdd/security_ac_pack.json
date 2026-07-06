@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "themis-security-baseline",
+  "description": "Default security acceptance criteria appended to matching tasks before the blind writer sees them. Each criterion is written to be instantiated against the task's concrete public surface; a criterion that genuinely does not apply escapes through the normal needs_human triage. Operators should copy and tailor this file — the more concrete the criteria, the stronger the derived tests.",
+  "criteria": [
+    {
+      "category": "input-validation-size",
+      "given": "a public entry point from public_surface that accepts string, bytes, or collection input",
+      "when": "it is called with an input of 1000000 characters or elements, far beyond any documented limit",
+      "then": "the call raises the documented validation error (for example ValueError) before processing or storing the oversized input",
+      "notes": "Instantiate against the concrete entry points in public_surface and public_api.md. If no entry point accepts variable-size input, report this criterion as needs_human with reason 'external_dep' or a note that it is not applicable to this surface."
+    },
+    {
+      "category": "input-validation-type",
+      "given": "a public entry point from public_surface with a required parameter",
+      "when": "it is called with None or a value of a wrong type for that parameter",
+      "then": "the entry point raises TypeError, ValueError, or the documented validation error, and returns no silently coerced result",
+      "notes": "One parameterized test over the entry points and a few wrong-typed values is enough. If the language cannot express a wrong-typed call, report needs_human."
+    },
+    {
+      "category": "injection-metacharacters",
+      "given": "a public entry point whose input can reach a file path, shell command, database query, or markup sink",
+      "when": "it is called with input containing sink metacharacters such as '../', a null byte, a single quote, or '<script>'",
+      "then": "the call either raises the documented validation error or returns a result in which the metacharacters were treated as data — no file outside the intended directory is touched and no command or query interprets them",
+      "notes": "Pick the metacharacters that match the sink the spec implies. If the task's surface has no such sink, report this criterion as needs_human with a note that no injection sink exists."
+    },
+    {
+      "category": "no-hardcoded-secrets",
+      "given": "the implementation source files behind public_surface.module",
+      "when": "the test reads those files as text at test runtime and scans for credential patterns ('BEGIN RSA PRIVATE KEY', 'BEGIN PRIVATE KEY', 'AKIA' access-key prefixes, and password/secret/api_key assignments to non-placeholder string literals)",
+      "then": "the scan matches 0 credential patterns, and the test raises an assertion failure before implementation exists because the files it scans are missing",
+      "notes": "This is a static test: it reads the implementation files at test runtime, so it can be written blind — the writer never sees the implementation while writing it. Assert first that the implementation files exist (so the test fails red), then that the scan finds nothing."
+    },
+    {
+      "category": "sanitized-error-surfaces",
+      "given": "a public entry point that reports failures to its caller",
+      "when": "an operation fails on invalid input",
+      "then": "the error message returned or raised contains no traceback text such as 'Traceback (most recent call last)', no absolute filesystem paths, and no environment-variable values",
+      "notes": "Trigger a failure through the public surface and assert on the absence of these patterns in the surfaced message. Asserting on the ABSENCE of leak patterns is robust and is an allowed exception to the 'don't assert on stringified error messages' rule. If failures cannot be triggered through the public surface, report needs_human."
+    },
+    {
+      "category": "no-dangerous-constructs",
+      "given": "the implementation source files behind public_surface.module",
+      "when": "the test reads those files as text at test runtime and scans for dangerous constructs ('eval(', 'exec(', 'pickle.loads(', 'yaml.load(' without SafeLoader, 'shell=True')",
+      "then": "the scan matches 0 dangerous constructs, and the test raises an assertion failure before implementation exists because the files it scans are missing",
+      "notes": "Static test like no-hardcoded-secrets. Adjust the construct list to the implementation language of this task; drop patterns that are meaningless in it."
+    }
+  ]
+}
