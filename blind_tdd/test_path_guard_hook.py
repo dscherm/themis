@@ -583,6 +583,49 @@ def test_blocked_src_write_on_locked_path_records_tamper():
         assert records[0]["agent_role"] == "arbiter"
 
 
+def test_each_role_can_write_its_mandated_output():
+    """Regression: every blind role's DEFAULT allowed_paths must permit the
+    exact output file the orchestrator requires from it — the writer's triage,
+    the runner's green report, the arbiter's ruling.
+
+    This drives the real hook against `session.default_allowed_paths(role)` and
+    `orchestrator._expected_manual_output(role, ...)`, so it catches the class
+    of bug where a role is prompted/required to write a file its own whitelist
+    forbids. (A live run caught exactly this: triage/** and green_report/**
+    were missing, so the writer/runner could never signal completion.)
+    """
+    from blind_tdd.session import default_allowed_paths, default_blocked_paths
+    from blind_tdd.orchestrator import _expected_manual_output
+
+    cases = {
+        "test_writer": {"task_id": "t1"},
+        "test_runner": {"task_id": "t1"},
+        "arbiter": {"task_id": "t1", "challenge_id": "c1"},
+    }
+    for role, inputs in cases.items():
+        out_path = _expected_manual_output(role, inputs["task_id"], inputs)
+        assert out_path is not None, f"no mandated output declared for {role}"
+        session = {
+            "session_id": f"reg-{role}",
+            "agent_role": role,
+            "task_id": "t1",
+            "allowed_paths": default_allowed_paths(role),
+            "blocked_paths": default_blocked_paths(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _write_session(cwd, session)
+            rc, _, stderr = _run_hook(cwd=cwd, input_json={
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(out_path).replace("\\", "/"),
+                               "content": "{}"},
+            })
+            assert rc == 0, (
+                f"{role} is required to write {out_path} but its default "
+                f"allowed_paths forbid it (rc={rc}); stderr={stderr}"
+            )
+
+
 def _run_all() -> int:
     tests = [v for k, v in globals().items()
              if callable(v) and k.startswith("test_")]

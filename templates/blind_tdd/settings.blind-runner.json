@@ -1,10 +1,11 @@
 {
-  "_comment": "Settings for Blind TDD Agent #2 (test runner). Bash is allowed ONLY for test-runner commands (pytest, jest, dotnet test, etc.) — never for cat/grep/find which would bypass Layer 1. Read/Grep/Glob guarded by PreToolUse hook. Test files are read-only for this agent (Edit/Write denied).",
+  "_comment": "Settings for Blind TDD Agent #2 (test runner). Bash is allowed ONLY for test-runner commands (pytest, jest, dotnet test, etc.) — never for cat/grep/find which would bypass Layer 1. Read/Grep/Glob/Write guarded by PreToolUse hook. Write is allowed SO THE RUNNER CAN EMIT ITS MANDATED green_report — the path guard scopes it to green_report/** and the locked-test hash rule denies writing any sealed test file, so this is not a hole. Edit/NotebookEdit stay denied (tests are read-only; the report is a fresh file).",
   "permissions": {
     "allow": [
       "Read",
       "Grep",
       "Glob",
+      "Write",
       "Bash(pytest*)",
       "Bash(python -m pytest*)",
       "Bash(python3 -m pytest*)",
@@ -37,14 +38,13 @@
       "Bash(git diff*)",
       "Bash(git blame*)",
       "Edit",
-      "Write",
       "NotebookEdit"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob",
+        "matcher": "Read|Grep|Glob|Write",
         "hooks": [
           {
             "type": "command",

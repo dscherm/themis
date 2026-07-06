@@ -60,12 +60,15 @@ _DEFAULT_WRITER_ALLOWED = [
     "CLAUDE.md",
     "README.md",
     ".themis/blind_tdd/active_session.json",  # agent needs to know it's blind
+    ".themis/blind_tdd/triage/**",  # the writer's MANDATED output — its triage report
 ]
 
 
 # Default allowed paths for Agent #2 (test runner). Same as writer but
-# also allows reading test config files needed to execute tests.
+# also allows reading test config files needed to execute tests, and writing
+# its own mandated output (the green report).
 _DEFAULT_RUNNER_ALLOWED = _DEFAULT_WRITER_ALLOWED + [
+    ".themis/blind_tdd/green_report/**",  # the runner's MANDATED output
     "pyproject.toml",
     "pytest.ini",
     "setup.cfg",
