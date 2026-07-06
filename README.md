@@ -13,7 +13,7 @@ When the same agent writes code and writes the tests that check the code, the te
 Themis grounds **only what is executably specifiable**. Within that scope, it can establish that code does what a specification says without the author of the code in the loop.
 
 It does **not**:
-- judge whether a spec is correct, wise, or complete (a vague or wrong spec earns a confident pass on the wrong thing; the spec is the trust boundary)
+- judge whether a spec is correct, wise, or complete (a vague or wrong spec earns a confident pass on the wrong thing; the spec is the trust boundary). One slice of that risk *is* measurable: an **untestable** criterion is the one kind of bad spec the system can detect, and `python -m blind_tdd.spec_health` reports the rate at which a project's criteria come back `needs_human` from the blind writer, with reasons and trend. Wrong or incomplete specs stay invisible to it — see the three-class taxonomy in [`docs/limitations.md`](docs/limitations.md)
 - verify declarative knowledge, prose, or design rationale (it is not a lie-detector for an agent's text)
 - guarantee a perfect wall (it is defense in depth; see [Limitations](#limitations))
 - guarantee test **strength**. The gate enforces the test's *independence* (written without sight of the code) and *integrity* (not edited afterward). It does not prove a test is strong enough to fail a wrong implementation. A test can be independent, untampered, AC-tagged, and still too weak to catch a bug. Measuring strength requires perturbing the implementation and checking whether a test fails (mutation testing), which needs an agent that *can* read the code, the opposite of the blind writer. So it's a separate, **advisory** pass — `blind_tdd.mutate` surfaces surviving (test-passing) mutants as weak spots — **not** part of the gate's guarantee: a surviving mutant is a warning, never a gate failure.
@@ -82,6 +82,9 @@ python -m pytest               # run the test suite
 # inspect the impossible-AC probe catalog and the gate verdict
 python -m blind_tdd.probes --list
 python -m blind_tdd.probes --gate --runs-file data/probe_runs.jsonl --min-on-runs 20
+
+# how measurable are this project's specs? (needs_human escalation rate)
+python -m blind_tdd.spec_health
 ```
 
 To adopt the gate on an existing project, start with [`docs/adoption-guide.md`](docs/adoption-guide.md). The design rationale is in [`docs/rfc.md`](docs/rfc.md).
