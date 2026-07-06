@@ -69,6 +69,8 @@ The routing rule is also where detection feeds back into prediction. A hash brea
 
 Two security-focused layers ride on that same machinery. A **suppression-marker audit** (on by default, advisory) baselines the repo's lint/security suppression comments (`# noqa`, `# nosec`, `eslint-disable`, ...) at seal time and diffs at green — masking a problem instead of fixing it is the same move as editing a test, one layer over — and a marker introduced during implementation warns on the result and feeds the tamper ledger, never failing the run. An opt-in **security AC pack** attacks the spec-as-trust-boundary problem from the other side: an operator-authored, fingerprinted catalog of security acceptance criteria (input rejection, no hardcoded secrets, sanitized error surfaces) is appended to matching tasks before the blind writer sees them, so security tests the spec author forgot get derived, sealed, and enforced like everything else. Both are covered by the seal HMAC and both are honest about their limits — see [`docs/adoption-guide.md`](docs/adoption-guide.md) and [`docs/limitations.md`](docs/limitations.md).
 
+The shipped default pack is deliberately generic, and generic criteria derive weaker tests — so the pack comes with a **tailoring interview** (`/blind-tdd:security-pack-setup`). It explores the repo before asking anything, interviews the operator one question at a time against the evidence it found (real entry points, sinks, secret handling, error surfaces), and drafts project-specific criteria. The interview's exit gate is objective rather than a judgment call: `python -m blind_tdd.pack_wizard --lint` holds drafts to the same criterion-quality checks preflight applies post-injection, plus a genericity warning for anything still phrased as "any public entry point". The LLM only drafts — installation is human-approved, and the installed pack is project-root spec content, committed and reviewed like any spec change. A pack untouched for 90+ days earns a re-interview nudge, because tailored criteria rot as the attack surface grows.
+
 ## Quickstart
 
 ```bash
@@ -93,7 +95,7 @@ The blindness layer ships as an installable Claude Code plugin in [`plugin/blind
 /plugin install blind-tdd@themis
 ```
 
-The plugin provides the enforcement surface — the `PreToolUse` path/bash guards, the `PostToolUse` audit, and the writer/runner/arbiter agent definitions, auto-activating passthrough-by-default. This package is the orchestration engine it drives (install it with `pip install themis-blind-tdd`). See the [plugin README](plugin/blind-tdd/README.md) for a 60-second quickstart and a recorded demo.
+The plugin provides the enforcement surface — the `PreToolUse` path/bash guards, the `PostToolUse` audit, and the writer/runner/arbiter agent definitions, auto-activating passthrough-by-default — plus two setup interviews: **`/blind-tdd:setup`** (routing — which tasks the gate engages on) and **`/blind-tdd:security-pack-setup`** (tailoring the security AC pack to the project's actual attack surface). This package is the orchestration engine it drives (install it with `pip install themis-blind-tdd`). See the [plugin README](plugin/blind-tdd/README.md) for a 60-second quickstart and a recorded demo.
 
 ## Evidence
 
