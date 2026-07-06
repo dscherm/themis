@@ -220,6 +220,8 @@ result = run_blind_tdd_gate(config)
 | `claude_binary` | `"claude"` | Path or name of the claude CLI |
 | `spawn_timeout_seconds` | `1800` | Per-agent spawn timeout |
 | `routing` | _(gate every task)_ | **Optional.** Restricts the gate to selected tasks (see below). Omit it and every resolved task is gated, as before. |
+| `suppression_audit` | `true` | Advisory scan for lint/security suppression comments (`# noqa`, `# nosec`, `eslint-disable`, ...) introduced during the implementation window (see below). Warns and feeds the tamper ledger; never fails a run. |
+| `security_ac_pack` | _(disabled)_ | **Optional.** Appends operator-authored security acceptance criteria to matching tasks before the blind writer sees them (see below). |
 
 ### Routing — which tasks get the gate
 
@@ -265,6 +267,55 @@ Two properties keep the ledger honest:
 
 - **It's additive-only.** A ledger match can force the gate ON for a task the policy would have skipped; nothing in it can turn the gate OFF. An agent that deletes the ledger only reverts to the human-set base policy — it can't lower the wall below where you put it.
 - **It matches on operator-authored metadata only** — the same trust rule as routing itself. Similarity is judged from the task's id, its declared `files`/`public_surface`, and its tags, never from anything the implementing agent writes.
+
+### Suppression-marker audit — the same evasion, one layer over
+
+A well-documented failure mode of AI-written code is masking a problem instead of fixing it: leaving a hardcoded secret in place and silencing the linter that would flag it with a `# nosec` comment. That's the same move as editing a test to make it pass — gaming the check rather than the code — in a dimension the seal doesn't watch.
+
+The gate watches it separately. At red (seal time) it baselines every lint/security suppression marker in the repo (`# noqa`, `# nosec`, `# type: ignore`, `# pragma: no cover`, `eslint-disable`, `@ts-ignore`, `@SuppressWarnings`, `#pragma warning disable`, `//nolint`, `nosemgrep`, `rubocop:disable`, ...); at green it rescans and diffs. A marker that appeared during the implementation window:
+
+- adds a **WARNING (advisory)** to the green result (`details.suppression_findings`),
+- lands in the tamper ledger as `suppression_marker_introduced`, so **similar tasks get escalated into the gate on later runs** — the same additive-only escalation as a hash break,
+- **never fails the run.** There are legitimate reasons to suppress a lint rule; a false-positive gate teaches operators to turn the gate off. The ledger is the teeth.
+
+The baseline is stored in the red-state record and covered by the `THEMIS_SEAL_KEY` HMAC when set, so an implementer can't pre-date its own markers into the baseline. On by default; set `"suppression_audit": false` to turn it off.
+
+### Security AC pack — security criteria the spec forgot
+
+The gate's trust boundary is the spec: a task whose acceptance criteria never mention input validation earns a confident pass without any. The `security_ac_pack` block closes that for the security domain. When enabled, the gate appends a versioned, operator-authored catalog of security criteria to every matching task **before the blind writer sees it** — so the writer derives sealed, independent security tests exactly as it does for the task's own criteria:
+
+```json
+"security_ac_pack": {
+  "enabled": true,
+  "pack_path": null,
+  "match": { "tags": ["security"], "path_globs": ["auth/**", "billing/**"] }
+}
+```
+
+- `pack_path: null` uses the shipped default pack (`templates/blind_tdd/security_ac_pack.json`: oversized-input rejection, wrong-type rejection, injection metacharacters, no hardcoded secrets, sanitized error surfaces, no dangerous constructs). **Copy and tailor it** — the more concrete the criteria, the stronger the derived tests.
+- `match` takes the same predicates as `routing` — and inherits the same trust caveat (see "Two things to keep honest about routing" above): if the implementing agent can author its own task `tags`, it can label a task out of pack scope. Prefer `path_globs` for `match`, or leave it empty so the pack applies to every gated task.
+- Injection is deterministic (pack criteria continue the task's `AC-N` numbering) and fingerprinted: the pack's SHA-256 is sealed into the red-state record (HMAC-covered when `THEMIS_SEAL_KEY` is set), and a pack that changes between red and green fails the green phase with `reason="security_pack_changed"`.
+- A pack criterion that genuinely doesn't apply to a task (no injection sink, no variable-size input) escapes through the normal `needs_human` triage — the writer reports why instead of writing a vacuous test.
+
+Two honest caveats. Generic criteria derive weaker tests than task-specific ones — treat the default pack as a floor, not a ceiling, and point the advisory mutation pass (`blind_tdd.mutate`) at the pack-derived tests to measure them. And the pack file sits on the *operator's* side of the trust boundary: version it, review changes to it like spec changes, and never let the implementing agent edit it.
+
+#### Tailoring the pack — the interview wizard
+
+The recommended way past the genericity caveat is the pack interview: **`/blind-tdd:security-pack-setup`** (plugin command). It explores your repo first (entry points, sinks, secret handling, error surfaces), then interviews you one question at a time to confirm what matters — citing the evidence it found rather than asking you to recall your codebase — and drafts project-specific criteria that name your actual functions and limits.
+
+The interview's exit gate is objective, not a judgment call: a draft is done when it passes
+
+```bash
+python -m blind_tdd.pack_wizard --lint draft.json
+```
+
+which applies the same criterion-quality checks the gate's preflight uses (observable `then` language, no subjective words) plus a genericity warning for criteria that still speak of "any public entry point". Installation is explicit and human-approved:
+
+```bash
+python -m blind_tdd.pack_wizard --install draft.json --match-glob 'auth/**' --yes
+```
+
+writes `themis.security_pack.json` (project root — **commit it**; it's spec content) and enables `security_ac_pack` in `themis.config.json`. The LLM only drafts; you approve every criterion, and the gate fingerprints the installed pack as usual. Once a tailored pack is 90+ days old the gate nudges you (stderr + `.themis/alerts.log`) to re-run the interview — packs rot as the attack surface grows.
 
 **Recommended for first adoption:** `"enforcement": "warn"` + `"spawner": "manual"`. You'll see briefs land in `.themis/blind_tdd/pending/` without any commit being blocked or any agent being spawned automatically.
 
