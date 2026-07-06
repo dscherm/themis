@@ -54,15 +54,32 @@ def test_writer_frontmatter_and_body(tmp_path):
     assert "# Blind TDD — Test Writer Agent (Agent #1)" in text
 
 
+def _tools_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("tools:"):
+            return line
+    return ""
+
+
 def test_runner_has_bash_arbiter_does_not(tmp_path):
     asm.assemble(_RALPH_HOME, tmp_path)
     runner = (tmp_path / "agents" / "blind-runner.md").read_text(encoding="utf-8")
     arbiter = (tmp_path / "agents" / "blind-arbiter.md").read_text(encoding="utf-8")
-    assert "tools: Read, Grep, Glob, Bash" in runner
+    assert "Bash" in _tools_line(runner)
     assert "model: opus" in arbiter
-    # arbiter's tools line has no Bash (its description mentions "no Bash", so
-    # check the tools: line specifically, not the whole frontmatter block)
-    assert "tools: Read, Grep, Glob, WebFetch" in arbiter
+    assert "Bash" not in _tools_line(arbiter)
+
+
+def test_every_role_can_write_its_report(tmp_path):
+    """Regression: each blind role's frontmatter must grant Write so it can emit
+    its mandated output (triage / green_report / ruling). A live run found the
+    runner and arbiter grants missing Write, leaving the agent no tool for its
+    report. This asserts the plugin surface, mirroring test_role_settings for
+    the engine settings surface."""
+    asm.assemble(_RALPH_HOME, tmp_path)
+    for agent in ("blind-writer", "blind-runner", "blind-arbiter"):
+        text = (tmp_path / "agents" / f"{agent}.md").read_text(encoding="utf-8")
+        assert "Write" in _tools_line(text), f"{agent}: frontmatter tools grant omits Write"
 
 
 def test_missing_prompt_dir_raises(tmp_path):

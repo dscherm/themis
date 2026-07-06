@@ -60,11 +60,15 @@ ROLES = {
         # express the Bash(pytest*)-only restriction from settings.blind-runner.json.
         # The in-session model therefore REQUIRES a blind_tdd_bash_guard.py hook to
         # block cat/grep/find/etc. while a session is active. See README §Bash guard.
-        "tools": "Read, Grep, Glob, Bash",
+        # Write is required so the runner can emit its green_report; the path guard
+        # scopes it (green_report/**) and the locked-test hash rule blocks writing
+        # any sealed test, so this is not a blindness hole. No Edit/NotebookEdit.
+        "tools": "Read, Grep, Glob, Bash, Write",
         "description": (
             "Blind TDD test runner (Agent #2): executes the hash-locked tests and "
             "produces a verified green report. Bash restricted to test commands; "
-            "stays blind to implementation via the path-guard + bash-guard hooks."
+            "Write scoped to the green report by the path guard; stays blind to "
+            "implementation via the path-guard + bash-guard hooks."
         ),
     },
     "arbiter": {
@@ -72,10 +76,13 @@ ROLES = {
         "agent": "blind-arbiter.md",
         "name": "blind-arbiter",
         "model": "opus",
-        "tools": "Read, Grep, Glob, WebFetch",
+        # Write is required so the arbiter can emit its ruling; the path guard
+        # scopes it (rulings/**) and denies any sealed test. No Bash, no Edit.
+        "tools": "Read, Grep, Glob, WebFetch, Write",
         "description": (
             "Blind TDD arbiter (Agent #3): rules upheld/rejected/ambiguous on a "
-            "challenge to a blind test. Read-only; no Bash, no Edit/Write."
+            "challenge to a blind test. No Bash, no Edit; Write scoped to the "
+            "ruling file by the path guard."
         ),
     },
 }
