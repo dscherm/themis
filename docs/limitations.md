@@ -21,6 +21,19 @@ language (`smoothly`, `properly`) is flagged — but it cannot judge whether the
 criteria describe the *right* behavior. Garbage spec, garbage oracle. Spec
 review remains a human responsibility upstream of the gate.
 
+Be precise about which failure class each tool sees. A spec is bad in one of
+three ways: **unmeasurable** (untestable criteria — mechanically detectable,
+and detected: preflight and `lint_tasks` catch the structural cases, the
+blind writer's `needs_human` triage catches the judgment cases, and
+`python -m blind_tdd.spec_health` aggregates those escalations into a
+per-project unmeasurability rate); **measurable but wrong** (invisible from
+inside the system — only internal *contradictions* self-announce, as
+perpetual red plus challenges); and **measurable but incomplete** (invisible
+by inspection — only patchable with omission catalogs like the security AC
+pack). The rate is a floor gauge for the first class only. Do not optimize
+specs *for* it: a spec tuned to maximize measurability trends toward brittle,
+over-specified criteria — Goodhart, one level up.
+
 The **security AC pack** (`security_ac_pack` config) narrows this hole for one
 domain: it appends operator-authored security criteria (input rejection, no
 hardcoded secrets, sanitized error surfaces, ...) to matching tasks the spec
