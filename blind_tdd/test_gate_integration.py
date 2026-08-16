@@ -91,7 +91,7 @@ class _StubOrchestrator:
 def _install_stub_orch(monkey_orch):
     """Replace _make_orchestrator with a factory that returns the stub."""
     original = gi._make_orchestrator
-    gi._make_orchestrator = lambda cfg: monkey_orch
+    gi._make_orchestrator = lambda config, btd_cfg: monkey_orch
     return original
 
 
@@ -385,6 +385,40 @@ def test_red_state_round_trip():
             assert loaded["spawn_agent_id"] == "sess-7"
             gi.clear_red_state("t")
             assert gi.load_red_state("t") is None
+
+
+def test_red_state_records_sealed_roots_when_present():
+    """AC4: which roots the blindness seal actually denied must be
+    auditable from the durable red-state artifact, not just the ephemeral
+    active_session.json (deleted on every deactivate())."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            r = RedPhaseResult(
+                passed=True,
+                test_file_hashes={"a": "1"},
+                triage_report={},
+                sealed_roots={
+                    "blocked_paths": ["server/**", "core/**", ".git/**"],
+                    "roots": ["server", "core"],
+                    "languages": ["python"],
+                    "method": "language-scan",
+                },
+            )
+            gi.save_red_state("t", r)
+            loaded = gi.load_red_state("t")
+            assert loaded["sealed_roots"]["roots"] == ["server", "core"]
+            assert loaded["sealed_roots"]["languages"] == ["python"]
+
+
+def test_red_state_omits_sealed_roots_when_absent():
+    """Back-compat: a RedPhaseResult with no sealed_roots (legacy/direct-API
+    orchestrator construction) must not add a misleading empty field."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            r = RedPhaseResult(passed=True, test_file_hashes={}, triage_report={})
+            gi.save_red_state("t", r)
+            loaded = gi.load_red_state("t")
+            assert "sealed_roots" not in loaded
 
 
 def _pay_task(task_id: str, module: str, files: list[str], tags: list[str] | None = None) -> dict:
@@ -821,6 +855,8 @@ def _run_all() -> int:
         test_invalid_task_fails_strict,
         test_invalid_task_warns_but_passes,
         test_red_state_round_trip,
+        test_red_state_records_sealed_roots_when_present,
+        test_red_state_omits_sealed_roots_when_absent,
         test_hash_break_feeds_escalation_for_next_run,
         test_seal_record_tamper_is_recorded,
         test_red_saves_suppression_baseline_by_default,

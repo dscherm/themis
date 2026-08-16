@@ -9,6 +9,7 @@ unchanged behavior.
 
 from __future__ import annotations
 
+import json
 import types
 
 from blind_tdd import gate_integration as gi
@@ -112,6 +113,24 @@ def test_deleting_signed_extras_fails(tmp_path, monkeypatch):
     del state["security_pack"]
     ok, _ = gi.verify_red_state_seal(state)
     assert not ok
+
+
+def test_tampered_sealed_roots_fails(tmp_path, monkeypatch):
+    """A rewritten sealed_roots record (claiming a blindness seal that didn't
+    actually hold at red time) is caught the same way as the other extras."""
+    monkeypatch.setenv(gi.SEAL_KEY_ENV, _KEY)
+    monkeypatch.chdir(tmp_path)
+    gi.save_red_state(
+        "t1", _fake_red({"tests/a.py": "h1"}),
+    )
+    # Simulate a caller that saved sealed_roots directly onto the record
+    # (RedPhaseResult path) by forging it post-hoc into the state file.
+    state_path = tmp_path / ".themis" / "blind_tdd" / "red_state" / "t1.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["sealed_roots"] = {"roots": ["server"], "languages": ["python"]}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    ok, reason = gi.verify_red_state_seal(state)
+    assert not ok and "mismatch" in reason
 
 
 def test_old_two_field_records_still_verify(monkeypatch):

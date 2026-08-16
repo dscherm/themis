@@ -113,6 +113,26 @@ def _build_resume_context_block(ruling: dict) -> str:
     )
 
 
+def _sanitize_task_for_brief(task: dict) -> dict:
+    """Strip fields from a task spec that would hand a blind agent a reading
+    list into implementation code.
+
+    `steps` is host/bridge-authored guidance for the IMPLEMENTING agent
+    (e.g. "read server/unit_store.py", "read core/compliance.py") — useful
+    once the code exists, actively harmful handed to a blind writer/runner/
+    arbiter, whose brief otherwise names only the task spec, acceptance
+    criteria, and public_surface. The brief-building spawners (ClaudeCodeSpawner,
+    AgentSdkSpawner, ManualSpawner) all receive `inputs["task"]` verbatim and
+    dump it into the agent's context, so this must be applied here — the one
+    place every spawn path shares — not per-spawner.
+    """
+    if not isinstance(task, dict) or "steps" not in task:
+        return task
+    sanitized = dict(task)
+    del sanitized["steps"]
+    return sanitized
+
+
 def _merge_triage(previous: dict, new: dict) -> dict:
     """Merge two triage reports, with entries from `new` taking precedence.
 
@@ -284,6 +304,12 @@ class RedPhaseResult:
     coverage: CoverageResult | None = None
     violations: list[dict] = field(default_factory=list)
     spawn_result: dict = field(default_factory=dict)
+    # Which roots the blind session actually sealed for this run, and how
+    # they were derived (see blind_tdd.roots) — an auditable record of what
+    # blindness claim this red phase can support. Empty when the orchestrator
+    # was constructed without an explicit/derived blocked_paths (falls back
+    # to session.py's generic defaults, unrecorded — legacy/direct-API path).
+    sealed_roots: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -315,6 +341,8 @@ class BlindTddOrchestrator:
         runner_prompt_path: str = "templates/blind_tdd/prompts/test_runner.md",
         arbiter_prompt_path: str = "templates/blind_tdd/prompts/arbiter.md",
         observations_path: str = ".themis/observations.jsonl",
+        blocked_paths: list[str] | None = None,
+        sealed_roots_meta: dict | None = None,
     ) -> None:
         self.spawner = spawner or ManualSpawner()
         self.test_dirs = test_dirs or ["tests/contracts/", "tests/integration/"]
@@ -322,6 +350,14 @@ class BlindTddOrchestrator:
         self.runner_prompt_path = runner_prompt_path
         self.arbiter_prompt_path = arbiter_prompt_path
         self.observations_path = observations_path
+        # None (the default) preserves the old behavior: every blind_session()
+        # call below falls back to session.py's generic default_blocked_paths().
+        # A caller that knows the project's real layout (gate_integration, via
+        # blind_tdd.roots.derive_blocked_paths) passes the derived list here so
+        # every spawned session actually seals the project's implementation
+        # directories instead of a JS-shaped guess.
+        self.blocked_paths = blocked_paths
+        self.sealed_roots_meta = sealed_roots_meta or {}
 
     # ------------------------------------------------------------------
     # Validation
@@ -362,13 +398,14 @@ class BlindTddOrchestrator:
             with blind_session(
                 agent_role="test_writer",
                 task_id=task_id,
+                blocked_paths=self.blocked_paths,
             ) as session:
                 spawn_result = self.spawner.spawn(
                     role="test_writer",
                     prompt_template=prompt,
                     inputs={
                         "task_id": task_id,
-                        "task": task,
+                        "task": _sanitize_task_for_brief(task),
                         "test_dirs": self.test_dirs,
                         "session_id": session["session_id"],
                     },
@@ -505,6 +542,7 @@ class BlindTddOrchestrator:
             coverage=coverage,
             violations=[],
             spawn_result=spawn_result,
+            sealed_roots=dict(self.sealed_roots_meta),
         )
 
     # ------------------------------------------------------------------
@@ -533,13 +571,14 @@ class BlindTddOrchestrator:
             with blind_session(
                 agent_role="test_runner",
                 task_id=task_id,
+                blocked_paths=self.blocked_paths,
             ) as session:
                 spawn_result = self.spawner.spawn(
                     role="test_runner",
                     prompt_template=prompt,
                     inputs={
                         "task_id": task_id,
-                        "task": task,
+                        "task": _sanitize_task_for_brief(task),
                         "test_dirs": self.test_dirs,
                         "red_phase_hashes": red_result.test_file_hashes,
                         "triage_report": red_result.triage_report,
@@ -755,13 +794,14 @@ class BlindTddOrchestrator:
             with blind_session(
                 agent_role="test_writer",
                 task_id=task_id,
+                blocked_paths=self.blocked_paths,
             ) as session:
                 spawn_result = self.spawner.spawn(
                     role="test_writer",
                     prompt_template=prompt,
                     inputs={
                         "task_id": task_id,
-                        "task": task,
+                        "task": _sanitize_task_for_brief(task),
                         "test_dirs": self.test_dirs,
                         "session_id": session["session_id"],
                         "resume_context": {
@@ -879,6 +919,7 @@ class BlindTddOrchestrator:
             coverage=coverage,
             violations=[],
             spawn_result=spawn_result,
+            sealed_roots=dict(self.sealed_roots_meta),
         )
 
     def resume_green_phase(

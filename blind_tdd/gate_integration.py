@@ -83,6 +83,7 @@ from .orchestrator import (
     RedPhaseResult,
 )
 from .preflight import preflight_task, MODE_OFF
+from .roots import RootInferenceError, derive_blocked_paths
 from .routing import RoutingDecision, evaluate_routing, normalize_routing
 from .schema_validator import validate_task
 
@@ -288,9 +289,11 @@ def _seal_key() -> bytes | None:
 
 # Red-state keys beyond the test hashes that the HMAC also covers when
 # present. Signing them closes the same re-seal hole for the suppression
-# baseline (an implementer pre-dating its own markers) and the security-pack
-# fingerprint (an implementer pointing the record at a weakened pack).
-_SEAL_EXTRA_KEYS = ("suppression_baseline", "security_pack")
+# baseline (an implementer pre-dating its own markers), the security-pack
+# fingerprint (an implementer pointing the record at a weakened pack), and
+# the sealed_roots audit record (an implementer rewriting the record to
+# claim a blindness seal that didn't actually hold at red time).
+_SEAL_EXTRA_KEYS = ("suppression_baseline", "security_pack", "sealed_roots")
 
 
 def _seal_extras(state: dict) -> dict:
@@ -361,6 +364,15 @@ def save_red_state(
         state["suppression_baseline"] = suppression_baseline
     if security_pack is not None:
         state["security_pack"] = security_pack
+    # getattr, not result.sealed_roots: some callers (tests, older code) pass
+    # a bare object standing in for RedPhaseResult without this field.
+    sealed_roots = getattr(result, "sealed_roots", None)
+    if sealed_roots:
+        # Durable, auditable record of what a green pass on this task can
+        # actually claim about blindness — session.json (the live contract
+        # the hook reads) is deleted on every deactivate(), so this is the
+        # only place that record survives past the spawn that produced it.
+        state["sealed_roots"] = sealed_roots
     key = _seal_key()
     if key is not None:
         state["seal_hmac"] = _seal_signature(
@@ -401,7 +413,16 @@ def _red_state_to_result(state: dict) -> RedPhaseResult:
 # Orchestrator construction
 # ---------------------------------------------------------------------------
 
-def _make_orchestrator(btd_cfg: dict) -> BlindTddOrchestrator:
+def _make_orchestrator(config: dict, btd_cfg: dict) -> BlindTddOrchestrator:
+    """Build the orchestrator for this gate run.
+
+    Raises RootInferenceError (from blind_tdd.roots) if the project's own
+    config doesn't say enough to derive real denied roots for the blindness
+    seal — the caller must surface that as a gate failure, never swallow it
+    and construct an orchestrator with an empty/wrong deny-list.
+    """
+    sealed = derive_blocked_paths(config)
+
     spawner_kind = btd_cfg["spawner"]
     if spawner_kind == "claude_code":
         try:
@@ -433,6 +454,8 @@ def _make_orchestrator(btd_cfg: dict) -> BlindTddOrchestrator:
         writer_prompt_path=str(base / "test_writer.md"),
         runner_prompt_path=str(base / "test_runner.md"),
         arbiter_prompt_path=str(base / "arbiter.md"),
+        blocked_paths=sealed.blocked_paths,
+        sealed_roots_meta=sealed.to_record(),
     )
 
 
@@ -560,6 +583,38 @@ def _check_pack_staleness(pack_path: Path) -> None:
         )
     except OSError:
         pass
+
+
+def _construct_orchestrator(
+    config: dict, btd_cfg: dict, task_id: str,
+) -> tuple[BlindTddOrchestrator | None, BlindGateResult | None]:
+    """Build the orchestrator, or a fail-loud gate result if it can't be built.
+
+    Constructed lazily (only when a phase is actually about to spawn an
+    agent) rather than unconditionally at the top of run_blind_tdd_gate: a
+    run that short-circuits before ever needing an agent (seal-tamper
+    detection, a pack fingerprint mismatch, routing exclusion) shouldn't pay
+    the cost of root derivation, and — more importantly — shouldn't have that
+    derivation's failure mask the real reason for the short-circuit.
+
+    On RootInferenceError (blind_tdd.roots): this must NEVER be caught and
+    silently downgraded to constructing the orchestrator with an empty/
+    JS-shaped deny-list — that is exactly the bug this module closes. It is
+    surfaced as a named, visible gate result instead.
+    """
+    try:
+        return _make_orchestrator(config, btd_cfg), None
+    except RootInferenceError as e:
+        fail = btd_cfg["enforcement"] == "strict"
+        return None, BlindGateResult(
+            passed=not fail,
+            phase="error",
+            message=(
+                f"blindness seal could not be derived for task {task_id!r}: {e}"
+            ),
+            reason="blind_root_inference_failed",
+            task_id=task_id,
+        )
 
 
 def run_blind_tdd_gate(config: dict) -> BlindGateResult:
@@ -694,13 +749,14 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             },
         )
 
-    orch = _make_orchestrator(btd_cfg)
-
     # Have we already completed the red phase for this task?
     red_state = load_red_state(task_id)
 
     if red_state is None:
         # ---- RED PHASE ----
+        orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
+        if orch_error is not None:
+            return orch_error
         try:
             red = orch.run_red_phase(task)
         except Exception as e:  # defensive — must never raise to smart_gate
@@ -841,6 +897,9 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
         )
 
     red_result = _red_state_to_result(red_state)
+    orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
+    if orch_error is not None:
+        return orch_error
     try:
         green = orch.run_green_phase(task, red_result)
     except Exception as e:
