@@ -363,7 +363,41 @@ Call `run_blind_tdd_gate(config)` from your script (Step 4). With `spawner: "man
    ran before it.
 6. You re-run the gate — this time it verifies coverage, saves red state, and tells you to implement.
 7. You (or the implementing agent) write the code.
-8. The next gate run finds the red state → kicks off the green phase → you run the runner agent manually the same way → final pass/fail lands.
+8. The next gate run finds the red state → kicks off the green phase → you run
+   the runner agent manually the same way → final pass/fail lands.
+
+   Or, if you already ran the tests yourself and they pass, close the phase
+   without a runner agent:
+
+   ```python
+   from blind_tdd.orchestrator import record_runner_handshake
+   record_runner_handshake("<task_id>", test_dirs=["tests/contracts/", "tests/integration/"])
+   ```
+
+   That call does not take a result. It runs pytest over the sealed test dirs
+   and builds `green_report/<task_id>.json` out of pytest's own JUnit XML, so
+   on a task whose tests fail it records `overall: "fail"` and the gate stays
+   red — it is a way to *report* a green, never to declare one. The report
+   carries the command and exit code it was built from, and the green phase
+   refuses a report that claims `pass` while its own evidence says otherwise.
+
+### Every role has one of these
+
+The three roles the orchestrator dispatches each finish by leaving one
+artifact, and each has one supported way to write it:
+
+| Role | Artifact | Recorder |
+|---|---|---|
+| `test_writer` | `.themis/blind_tdd/triage/<task_id>.json` | `record_writer_handshake(task_id, triage)` |
+| `test_runner` | `.themis/blind_tdd/green_report/<task_id>.json` | `record_runner_handshake(task_id, test_dirs=[...])` |
+| `arbiter` | `.themis/blind_tdd/rulings/<challenge_id>.json` | `record_arbiter_handshake(challenge_id, ruling)` |
+
+That table is `ROLE_HANDSHAKES` in `blind_tdd/orchestrator.py`, and it is the
+one place a role is declared — path, report shape and recorder together. A role
+added to it without a completion path fails `test_role_handshakes.py`. The
+first version of this feature gave a recorder to the writer alone, and an
+implementer whose blind contract was genuinely green — 155 tests, all passing —
+then had no way to close the green phase at all.
 
 ## Step 7 — switch to the `claude_code` spawner when ready
 
@@ -414,9 +448,9 @@ The gate fails under strict enforcement. If the implementer believes a specific 
 is missing. The advisory names the exact path it looked for, the locations it
 searched, and any traces of a run it did find (a blind-session audit log for
 the task, test files naming it). Read those traces first: if they are present,
-an agent ran and only the handshake is missing — write the report and re-run
-the gate, don't re-run the agent. If they are absent, the advisory says so
-explicitly.
+an agent ran and only the handshake is missing — write the report with the
+role's recorder (see the table in Step 6) and re-run the gate, don't re-run the
+agent. If they are absent, the advisory says so explicitly.
 
 This advisory deliberately does **not** claim that no agent ran. It cannot
 know that, and a version of it that said so was wrong on five consecutive

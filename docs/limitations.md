@@ -85,7 +85,15 @@ gate-runner process that reads it:
   against editing the *test*; it assumes the *record of the seal* is not itself
   attacker-controlled.
 - The green report (`.themis/blind_tdd/green_report/<task_id>.json`) is likewise a
-  filesystem artifact the runner trusts.
+  filesystem artifact the runner trusts. `record_runner_handshake` narrows this
+  without closing it: the supported path takes no result parameter and builds
+  the report from pytest's own JUnit XML, and the green phase rejects a report
+  whose claimed `overall: pass` contradicts the `measured` block it carries
+  (non-zero exit code, a test recorded as failing). What remains unchecked is a
+  report written by hand with no evidence block at all — that is still an
+  assertion, and verifying it would mean the gate re-running the suite itself,
+  which it does not do. A blind runner agent's report is exactly this shape by
+  design.
 
 **Mitigation (optional, opt-in): sign the seal record.** Set `THEMIS_SEAL_KEY` in
 the gate/host environment. The red phase then HMAC-SHA256s the baseline into the

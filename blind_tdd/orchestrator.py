@@ -43,11 +43,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
+from xml.etree import ElementTree
 
 from .artifacts import is_artifact_path
 from .coverage import verify_coverage, CoverageResult
@@ -166,16 +171,159 @@ def _merge_triage(previous: dict, new: dict) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The role table — every role's half of the protocol, and how it is closed
+# ---------------------------------------------------------------------------
+#
+# Three roles are dispatched from this module, and each finishes by leaving one
+# artifact behind. That mapping used to be an if/elif chain, and TD150 added a
+# recorder for exactly one branch of it (`test_writer`), because a writer was
+# the case that had been *observed* failing. The other two branches kept the
+# same defect: an agent dispatched by hand could do the work and had no
+# supported way to close its phase. On TD118 that cost a green gate — tests
+# genuinely passing, 155/155, and no way to say so.
+#
+# So the table below is the single place a role is declared: artifact path,
+# report shape, and the function that writes it. `test_role_handshakes.py`
+# iterates it, so a fourth role added here without a completion path fails a
+# test today instead of an operator six weeks from now.
+
+BLIND_TDD_DIR = Path(".themis") / "blind_tdd"
+
+
+def _validate_triage(payload: dict) -> None:
+    """The red-phase report `run_red_phase` step 5 hands to `verify_coverage`."""
+    entries = payload.get("triage")
+    if not isinstance(entries, list):
+        raise ValueError("triage report must have a 'triage' list")
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not entry.get("criterion"):
+            raise ValueError(
+                f"triage entry {i} must be a dict with a 'criterion' key"
+            )
+
+
+def _validate_green_report(payload: dict) -> None:
+    """The green-phase report `run_green_phase` reads.
+
+    It takes exactly two things out of it — `overall`, and the `name`/`result`
+    of each `per_test` entry (the passing names go to `verify_coverage`) — so
+    those are what must be present and well-typed. A report that omits them
+    would close the spawner's completion check and then fail the green phase
+    with a confusing KeyError-shaped reason.
+    """
+    overall = payload.get("overall")
+    if overall not in ("pass", "fail"):
+        raise ValueError("green report 'overall' must be 'pass' or 'fail'")
+    entries = payload.get("per_test")
+    if not isinstance(entries, list):
+        raise ValueError("green report must have a 'per_test' list")
+    if not entries and overall == "pass":
+        raise ValueError(
+            "a passing green report must name the tests that passed — "
+            "coverage is verified against those names"
+        )
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not entry.get("name"):
+            raise ValueError(
+                f"per_test entry {i} must be a dict with a 'name' key"
+            )
+        if entry.get("result") not in ("pass", "fail", "skip"):
+            raise ValueError(
+                f"per_test entry {i} must have result 'pass', 'fail' or 'skip'"
+            )
+
+
+def _validate_ruling(payload: dict) -> None:
+    """The arbiter's ruling, in the shape `challenge.spawn_arbiter` accepts.
+
+    That consumer returns None — silently — for any verdict outside the three
+    it knows, so a malformed ruling must fail here rather than land on disk and
+    be ignored.
+    """
+    verdict = str(payload.get("ruling", "")).lower().strip()
+    if verdict not in ("upheld", "rejected", "ambiguous"):
+        raise ValueError(
+            "ruling must be one of 'upheld', 'rejected', 'ambiguous'"
+        )
+    if not str(payload.get("criterion_affected", "")).strip():
+        raise ValueError("ruling must name the 'criterion_affected'")
+    if not str(payload.get("reasoning", "")).strip():
+        raise ValueError("ruling must carry the arbiter's 'reasoning'")
+
+
+def _writer_hint(task_id: str, inputs: dict) -> str:
+    return f"{task_id!r}, triage"
+
+
+def _runner_hint(task_id: str, inputs: dict) -> str:
+    return f"{task_id!r}, test_dirs={list(inputs.get('test_dirs') or [])!r}"
+
+
+def _arbiter_hint(task_id: str, inputs: dict) -> str:
+    return f"{str(inputs.get('challenge_id') or task_id)!r}, ruling"
+
+
+@dataclass(frozen=True)
+class HandshakeSpec:
+    """One role's completion artifact: where it lands, and what it must say."""
+
+    role: str
+    subdir: str
+    id_input_key: str
+    """Which `inputs` key names the artifact. `task_id` for the phase roles;
+    the arbiter's ruling is named by the challenge it rules on."""
+    recorder: str
+    """Public function in this module that writes the artifact."""
+    validate: Callable[[dict], None]
+    hint_args: Callable[[str, dict], str]
+    """Argument text for the brief's copy-pasteable invocation."""
+
+    def path_for(self, artifact_id: str, *, directory: Path | None = None) -> Path:
+        base = Path(directory) if directory is not None else BLIND_TDD_DIR / self.subdir
+        return base / f"{artifact_id}.json"
+
+
+ROLE_HANDSHAKES: dict[str, HandshakeSpec] = {
+    "test_writer": HandshakeSpec(
+        role="test_writer",
+        subdir="triage",
+        id_input_key="task_id",
+        recorder="record_writer_handshake",
+        validate=_validate_triage,
+        hint_args=_writer_hint,
+    ),
+    "test_runner": HandshakeSpec(
+        role="test_runner",
+        subdir="green_report",
+        id_input_key="task_id",
+        recorder="record_runner_handshake",
+        validate=_validate_green_report,
+        hint_args=_runner_hint,
+    ),
+    "arbiter": HandshakeSpec(
+        role="arbiter",
+        subdir="rulings",
+        id_input_key="challenge_id",
+        recorder="record_arbiter_handshake",
+        validate=_validate_ruling,
+        hint_args=_arbiter_hint,
+    ),
+}
+
+
+def _handshake_artifact_id(spec: HandshakeSpec, task_id: str, inputs: dict) -> str:
+    if spec.id_input_key == "task_id":
+        return task_id
+    return str((inputs or {}).get(spec.id_input_key) or task_id)
+
+
 def _expected_manual_output(role: str, task_id: str, inputs: dict) -> Path | None:
     """What file does the manual agent need to produce to signal completion?"""
-    if role == "test_writer":
-        return Path(".themis") / "blind_tdd" / "triage" / f"{task_id}.json"
-    if role == "test_runner":
-        return Path(".themis") / "blind_tdd" / "green_report" / f"{task_id}.json"
-    if role == "arbiter":
-        challenge_id = inputs.get("challenge_id", task_id)
-        return Path(".themis") / "blind_tdd" / "rulings" / f"{challenge_id}.json"
-    return None
+    spec = ROLE_HANDSHAKES.get(role)
+    if spec is None:
+        return None
+    return spec.path_for(_handshake_artifact_id(spec, task_id, inputs or {}))
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +609,42 @@ def gather_manual_evidence(
     )
 
 
+def record_handshake(
+    role: str,
+    artifact_id: str,
+    payload: dict,
+    *,
+    directory: Path | None = None,
+) -> Path:
+    """Write one role's completion artifact, validated against the role table.
+
+    The single implementation behind every `record_*_handshake` below. Adding
+    a per-role copy of this is how the writer ended up with a completion path
+    and the runner did not; the per-role functions exist only to build and name
+    their payload, never to re-implement the write.
+
+    Raises ValueError for a role with no mapped artifact (that role cannot be
+    detected as finished at all — say so rather than inventing a filename), and
+    for a payload the role's consumer could not read.
+    """
+    spec = ROLE_HANDSHAKES.get(role)
+    if spec is None:
+        raise ValueError(
+            f"no completion artifact is mapped for role {role!r}; add it to "
+            f"ROLE_HANDSHAKES so the role can close its phase"
+        )
+    if not isinstance(payload, dict):
+        raise ValueError(f"{role} handshake report must be a dict")
+    spec.validate(payload)
+
+    path = spec.path_for(str(artifact_id), directory=directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return path
+
+
 def record_writer_handshake(
     task_id: str,
     triage: dict,
@@ -487,26 +671,238 @@ def record_writer_handshake(
     """
     if not isinstance(triage, dict):
         raise ValueError("triage report must be a dict")
-    entries = triage.get("triage")
-    if not isinstance(entries, list):
-        raise ValueError("triage report must have a 'triage' list")
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict) or not entry.get("criterion"):
-            raise ValueError(
-                f"triage entry {i} must be a dict with a 'criterion' key"
-            )
-
-    triage_dir = Path(triage_dir) if triage_dir is not None else (
-        Path(".themis") / "blind_tdd" / "triage"
-    )
-    triage_dir.mkdir(parents=True, exist_ok=True)
-    path = triage_dir / f"{task_id}.json"
     payload = dict(triage)
     payload.setdefault("task", task_id)
-    path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    return record_handshake(
+        "test_writer", task_id, payload, directory=triage_dir
     )
-    return path
+
+
+def record_runner_handshake(
+    task_id: str,
+    *,
+    test_dirs: list | None = None,
+    targets: list | None = None,
+    cwd: Path | str | None = None,
+    pytest_args: list | tuple = (),
+    timeout: int = 3600,
+    green_report_dir: Path | None = None,
+) -> Path:
+    """Run the tests and record the outcome — the green-phase handshake.
+
+    The supported completion path for an implementing agent that made a blind
+    contract green outside the orchestrator. Until it existed, such an agent
+    could not close the green phase at any cost: the gate looked for
+    `green_report/<task>.json`, and nothing but a blind runner agent spawned by
+    the orchestrator could write one.
+
+    **This function does not accept a result.** There is no parameter through
+    which a caller states that the tests passed; the report is built from a
+    pytest run this function performs, out of pytest's own JUnit XML. Recording
+    a handshake on a task whose tests fail therefore writes `overall: "fail"`,
+    and the green phase refuses it — the recorder is a measurement, not a way
+    to declare green.
+
+    What it does NOT establish: the file it writes is an ordinary JSON file,
+    and an agent that bypasses this function can still hand-write one that
+    lies. That is a pre-existing property of the green report (see
+    `docs/limitations.md`), unchanged here — the gate's independent checks are
+    the sealed test hashes and `verify_coverage` against the tests on disk.
+    What changes is that the honest path no longer requires an assertion.
+    """
+    chosen = [str(t) for t in (targets or [])]
+    if not chosen:
+        base = Path(cwd) if cwd is not None else Path.cwd()
+        chosen = [
+            str(td) for td in (test_dirs or [])
+            if (base / str(td)).exists()
+        ]
+    if not chosen:
+        raise ValueError(
+            "nothing to run: pass `targets` (pytest node ids or files) or "
+            "`test_dirs` that exist relative to the project root"
+        )
+
+    report = measure_test_run(
+        chosen, cwd=cwd, pytest_args=pytest_args, timeout=timeout
+    )
+    report["task"] = task_id
+    return record_handshake(
+        "test_runner", task_id, report, directory=green_report_dir
+    )
+
+
+def record_arbiter_handshake(
+    challenge_id: str,
+    ruling: dict,
+    *,
+    task_id: str | None = None,
+    rulings_dir: Path | None = None,
+) -> Path:
+    """Write the ruling a hand-spawned arbiter must leave.
+
+    Named by the challenge, not the task — one task can carry several
+    challenges, and `challenge.spawn_arbiter` reads
+    `rulings/<challenge_id>.json`.
+    """
+    if not isinstance(ruling, dict):
+        raise ValueError("ruling must be a dict")
+    payload = dict(ruling)
+    payload.setdefault("challenge_id", challenge_id)
+    if task_id is not None:
+        payload.setdefault("task", task_id)
+    payload.setdefault("ruled_at", _now_iso())
+    return record_handshake(
+        "arbiter", challenge_id, payload, directory=rulings_dir
+    )
+
+
+# ---------------------------------------------------------------------------
+# Measuring a test run
+# ---------------------------------------------------------------------------
+
+def _aggregate_junit_cases(cases: list[dict]) -> list[dict]:
+    """Collapse parametrised cases onto the test function that owns them.
+
+    `verify_coverage` matches the names in `per_test` against the test function
+    names it parses out of the files on disk, and those carry no `[param]`
+    suffix. A function is reported passing only when EVERY one of its cases
+    passed — otherwise a suite with one failing parametrisation would hand
+    coverage a passing name.
+    """
+    order: list[str] = []
+    by_name: dict[str, dict] = {}
+    for case in cases:
+        name = case["name"].split("[", 1)[0]
+        entry = by_name.get(name)
+        if entry is None:
+            order.append(name)
+            entry = by_name[name] = {
+                "name": name,
+                "result": case["result"],
+                "cases": 0,
+                "file": case.get("file", ""),
+            }
+        entry["cases"] += 1
+        if case["result"] == "fail":
+            entry["result"] = "fail"
+        elif case["result"] == "pass" and entry["result"] == "skip":
+            entry["result"] = "pass"
+    return [by_name[n] for n in order]
+
+
+def _read_junit(path: Path) -> list[dict]:
+    """Per-case results out of a pytest JUnit XML report."""
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (OSError, ElementTree.ParseError):
+        return []
+    cases: list[dict] = []
+    for tc in root.iter("testcase"):
+        if tc.find("failure") is not None or tc.find("error") is not None:
+            result = "fail"
+        elif tc.find("skipped") is not None:
+            result = "skip"
+        else:
+            result = "pass"
+        cases.append({
+            "name": tc.get("name") or "",
+            "file": tc.get("file") or "",
+            "result": result,
+        })
+    return cases
+
+
+def _measurement_contradictions(green_report: dict) -> list[str]:
+    """Ways a green report's `overall: pass` is refuted by its own evidence."""
+    if green_report.get("overall") != "pass":
+        return []
+    measured = green_report.get("measured")
+    if not isinstance(measured, dict):
+        return []
+    found: list[str] = []
+    exit_code = measured.get("exit_code")
+    if isinstance(exit_code, int) and exit_code != 0:
+        found.append(f"the runner exited {exit_code}")
+    failing = [
+        str(e.get("name"))
+        for e in green_report.get("per_test") or []
+        if isinstance(e, dict) and e.get("result") == "fail"
+    ]
+    if failing:
+        found.append(
+            f"{len(failing)} test(s) recorded as failing: {failing[:5]}"
+        )
+    tests_failed = green_report.get("tests_failed")
+    if isinstance(tests_failed, int) and tests_failed > 0:
+        found.append(f"tests_failed={tests_failed}")
+    return found
+
+
+def measure_test_run(
+    targets: list,
+    *,
+    cwd: Path | str | None = None,
+    pytest_args: list | tuple = (),
+    timeout: int = 3600,
+) -> dict:
+    """Run pytest over `targets` and build a green report from what it did.
+
+    The report's contents come from pytest's JUnit XML — the runner's own
+    record of each test — not from anything the caller supplies. `measured`
+    carries the command, the exit code and the tail of the output, so a reader
+    can re-run exactly what produced the numbers.
+    """
+    targets = [str(t) for t in targets]
+    with tempfile.TemporaryDirectory() as tmp:
+        junit = Path(tmp) / "junit.xml"
+        cmd = [
+            sys.executable, "-m", "pytest", *targets,
+            "-q", "--tb=no", "-p", "no:cacheprovider",
+            f"--junitxml={junit}",
+            *[str(a) for a in pytest_args],
+        ]
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            # A measurement has to reflect the source on disk. Python validates
+            # a cached .pyc on (size, mtime-to-the-second), so a file edited
+            # within the same second as an earlier run, to the same length, is
+            # imported from stale bytecode — the run then reports the previous
+            # version of the code. Not writing the cache removes that.
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        cases = _read_junit(junit)
+
+    per_test = _aggregate_junit_cases(cases)
+    passed = sum(1 for c in cases if c["result"] == "pass")
+    failed = sum(1 for c in cases if c["result"] == "fail")
+    skipped = sum(1 for c in cases if c["result"] == "skip")
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+    return {
+        "phase": "green",
+        "overall": (
+            "pass" if proc.returncode == 0 and failed == 0 and passed > 0
+            else "fail"
+        ),
+        "tests_passed": passed,
+        "tests_failed": failed,
+        "tests_skipped": skipped,
+        "per_test": per_test,
+        "measured": {
+            "runner": "pytest",
+            "command": " ".join(cmd),
+            "exit_code": proc.returncode,
+            "targets": targets,
+            "cwd": str(Path(cwd).resolve()) if cwd is not None else str(Path.cwd()),
+            "generated_at": _now_iso(),
+            "output_tail": output[-2000:],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +1034,8 @@ class ManualSpawner:
         # role's output file, and a writer that followed the brief to the
         # letter still came back reported as never having run. Say what is
         # actually checked, and name the path.
-        if expected_output is not None:
+        spec = ROLE_HANDSHAKES.get(role)
+        if expected_output is not None and spec is not None:
             completion_step = [
                 f"4. **Write the completion artifact — this, and only this, is what",
                 f"   the orchestrator checks:**",
@@ -649,8 +1046,10 @@ class ManualSpawner:
                 f"   closes the phase: committed test files and the session audit",
                 f"   log are evidence you ran, but neither records WHEN you ran",
                 f"   relative to the implementation, which is the whole claim.",
-                f"   A `test_writer` can write it with",
-                f"   `blind_tdd.orchestrator.record_writer_handshake(task_id, triage)`.",
+                f"   Role `{role}` writes it with",
+                f"   `blind_tdd.orchestrator.{spec.recorder}("
+                f"{spec.hint_args(task_id, inputs)})`",
+                f"   — read that function's docstring before calling it.",
                 f"5. Delete this brief file (housekeeping — the orchestrator does it",
                 f"   for you on the next run once the artifact above is in place).",
             ]
@@ -1108,6 +1507,27 @@ class BlindTddOrchestrator:
                 reason=(
                     f"blind runner agent attempted {len(violations)} forbidden "
                     f"tool call(s); blindness integrity compromised"
+                ),
+                green_report=green_report,
+                hash_match=True,
+                coverage=coverage,
+                spawn_result=spawn_result,
+                violations=violations,
+            )
+
+        # A report that carries measurement evidence must agree with it. The
+        # recorder builds `measured` from pytest's own JUnit XML, so the cheap
+        # way to forge a green — run the recorder, get a fail, edit `overall`
+        # to "pass" — leaves the evidence behind contradicting the claim. This
+        # only fires on reports that carry evidence; a blind runner agent's
+        # hand-written report is an assertion by design (docs/limitations.md).
+        contradictions = _measurement_contradictions(green_report)
+        if contradictions:
+            return GreenPhaseResult(
+                passed=False,
+                reason=(
+                    "green report claims overall=pass but the measurement it "
+                    f"carries says otherwise: {'; '.join(contradictions)}"
                 ),
                 green_report=green_report,
                 hash_match=True,
