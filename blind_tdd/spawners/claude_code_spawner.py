@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..session import ROLE_SETTINGS_TEMPLATES
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -81,12 +83,11 @@ def subscription_env(base: dict | None = None, *, strip_api_key: bool = True) ->
 # Role → template file mapping
 # ---------------------------------------------------------------------------
 
-# Role → settings template filename (in templates/blind_tdd/)
-_ROLE_TO_SETTINGS = {
-    "test_writer": "settings.blind-writer.json",
-    "test_runner": "settings.blind-runner.json",
-    "arbiter": "settings.blind-arbiter.json",
-}
+# Role → settings template filename (in templates/blind_tdd/). Owned by
+# session.py alongside the other role policy; re-exported here under the name
+# this module has always used. The orchestrator's manual brief names the same
+# file, so what a human is told to install is what the spawner installs.
+_ROLE_TO_SETTINGS = ROLE_SETTINGS_TEMPLATES
 
 # Hook scripts that must be present in .claude/hooks/ before spawning.
 _HOOK_SCRIPTS = [

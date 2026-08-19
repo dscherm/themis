@@ -51,7 +51,12 @@ from typing import Callable, Protocol
 from .artifacts import is_artifact_path
 from .coverage import verify_coverage, CoverageResult
 from .schema_validator import validate_task, ValidationResult
-from .session import blind_session, get_audit_log, audit_violations
+from .session import (
+    blind_session,
+    get_audit_log,
+    audit_violations,
+    settings_template_for,
+)
 
 
 def _now_iso() -> str:
@@ -253,6 +258,24 @@ class ManualSpawner:
                 ),
             }
 
+        # Step 2 is what installs the path guard and denies Bash. Never guess
+        # the filename from the role — say plainly when none is mapped, so a
+        # reader knows the run would be unguarded rather than assuming it was
+        # configured by a file they could not find.
+        settings_file = settings_template_for(role)
+        if settings_file:
+            step_two = [
+                f"2. Apply the blind-TDD settings template for this role:",
+                f"   `.claude/settings.json` ← `templates/blind_tdd/{settings_file}`",
+            ]
+        else:
+            step_two = [
+                f"2. **STOP — no settings template is mapped for role `{role}`.**",
+                f"   Blindness would NOT be enforced: Bash stays available and the",
+                f"   PreToolUse path guard is never installed. Add a template for this",
+                f"   role to `blind_tdd.session.ROLE_SETTINGS_TEMPLATES` before running.",
+            ]
+
         brief_lines = [
             f"# Blind TDD — {role} task",
             f"",
@@ -272,8 +295,7 @@ class ManualSpawner:
             f"## How to run this agent",
             f"",
             f"1. Copy the above inputs into a fresh Claude Code session.",
-            f"2. Apply the blind-TDD settings template for this role:",
-            f"   `.claude/settings.json` ← `templates/blind_tdd/settings.blind-{role.replace('_', '-')}.json`",
+            *step_two,
             f"3. Run the agent.",
             f"4. Verify the output files were created.",
             f"5. Delete this brief file to signal completion.",

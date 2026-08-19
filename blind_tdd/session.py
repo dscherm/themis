@@ -104,6 +104,33 @@ def default_blocked_paths() -> list[str]:
     return list(_DEFAULT_BLOCKED)
 
 
+# Role → settings template filename (in templates/blind_tdd/). The settings
+# template is the second half of the blindness surface: it denies Bash and
+# wires the PreToolUse path guard. Which file a role gets is role policy — the
+# same kind of fact as `default_allowed_paths` above — so it lives here rather
+# than inside any one spawner. The orchestrator names it in the manual brief;
+# the Claude Code spawner copies it into `.claude/settings.local.json`. Both
+# read THIS dict, so a brief can never name a file the spawner would not use.
+#
+# The filenames are NOT derivable from the role (`test_writer` maps to
+# `settings.blind-writer.json`, not `settings.blind-test-writer.json`). Any
+# code that derives one is guessing; see test_manual_brief_settings.py.
+ROLE_SETTINGS_TEMPLATES = {
+    "test_writer": "settings.blind-writer.json",
+    "test_runner": "settings.blind-runner.json",
+    "arbiter": "settings.blind-arbiter.json",
+}
+
+
+def settings_template_for(agent_role: str) -> str | None:
+    """Return the settings template filename for a role, or None if unmapped.
+
+    None means "no blindness settings ship for this role" — callers must say so
+    plainly rather than substituting a plausible-looking filename.
+    """
+    return ROLE_SETTINGS_TEMPLATES.get(agent_role)
+
+
 def activate(
     *,
     agent_role: str,
