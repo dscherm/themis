@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +179,337 @@ def _expected_manual_output(role: str, task_id: str, inputs: dict) -> Path | Non
 
 
 # ---------------------------------------------------------------------------
+# What a hand-spawned agent leaves behind
+# ---------------------------------------------------------------------------
+#
+# `ManualSpawner` detects completion by one artifact: the role's expected
+# output file. When that file is absent the spawner used to report only that
+# the brief was staged, and its consumers turned that into the claim "the
+# writer agent has not run" — a statement about the world the check has no
+# evidence for. A writer dispatched by hand (Agent tool, fresh session) writes
+# tests, commits them, and never touches the handshake, so the claim was false
+# every time that happened.
+#
+# The functions below gather the OTHER traces a blind agent leaves — the
+# session audit log it cannot suppress, and test files naming the task — so
+# the advisory can report what it looked for, what it found, and what it did
+# not, instead of asserting a conclusion.
+#
+# They deliberately do NOT decide the handshake on that evidence. See the note
+# on `ManualEvidence.handshake` for why.
+
+_AUDIT_DIR = Path(".themis") / "blind_audit"
+
+# Suffixes `_hash_test_files` seals, plus the two coverage.py can tag.
+_TEST_SUFFIXES = (".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".rs", ".gd")
+
+
+def _task_id_pattern(task_id: str) -> re.Pattern[str]:
+    """Match `task_id` as a whole token, so TD1 does not match TD110.
+
+    Neither side may be an adjacent alphanumeric: `test_td10_export.py`
+    matches TD10, `test_td110_library.py` does not.
+    """
+    return re.compile(
+        rf"(?<![0-9a-z]){re.escape(task_id.lower())}(?![0-9a-z])"
+    )
+
+
+def _audit_sessions_for(
+    task_id: str,
+    role: str,
+    audit_dir: Path | None = None,
+) -> list[str]:
+    """Session ids of blind sessions that ran for this task in this role.
+
+    Read from the record bodies, never from the filename: a session is named
+    by whoever opened it (`td125-independent-verify-2026-08-18` is a real
+    example) and the name says nothing reliable about task or role.
+    """
+    audit_dir = Path(audit_dir) if audit_dir is not None else _AUDIT_DIR
+    if not audit_dir.is_dir():
+        return []
+    wanted = task_id.strip().lower()
+    sessions: list[str] = []
+    for path in sorted(audit_dir.glob("*.jsonl")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("task_id", "")).strip().lower() != wanted:
+                continue
+            if str(rec.get("agent_role", "")).strip() != role:
+                continue
+            sid = str(rec.get("session_id") or path.stem)
+            if sid not in sessions:
+                sessions.append(sid)
+            break
+    return sessions
+
+
+def _contract_files_for(task_id: str, test_dirs: list) -> list[str]:
+    """Test files under `test_dirs` whose name names this task."""
+    pattern = _task_id_pattern(task_id)
+    found: list[str] = []
+    for td in test_dirs or []:
+        root = Path(td)
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or is_artifact_path(path):
+                continue
+            if path.suffix.lower() not in _TEST_SUFFIXES:
+                continue
+            if pattern.search(path.name.lower()):
+                found.append(str(path))
+    return found
+
+
+@dataclass
+class ManualEvidence:
+    """Observable facts about a hand-run agent — findings, not a verdict.
+
+    `handshake` is decided by the expected output file ALONE, and the other
+    fields never move it. That is deliberate, and the reason is TD125 in the
+    in-the-loop-learning repo: a blind session ran for it under
+    `agent_role="test_writer"`, wrote a contract file, and committed it — but
+    it ran AFTER the implementation shipped, so it verified code rather than
+    constraining it. Its audit log and its committed test file are
+    indistinguishable from those of a genuine red phase. Ordering is the only
+    thing that separates the two, no scan of the repo can recover ordering
+    nobody recorded, and the handshake report is the record that fixes it.
+
+    So the evidence is reported, not acted on: a reader who sees an audit log
+    and a contract file but no handshake knows a writer ran and left no red
+    baseline — a different problem, with a different fix, from a writer that
+    never ran at all.
+    """
+
+    task_id: str
+    role: str
+    expected_output: Path | None
+    handshake: str  # "present" | "stale" | "absent" | "unmapped"
+    brief_path: Path | None = None
+    output_mtime: float | None = None
+    brief_mtime: float | None = None
+    audit_sessions: list[str] = field(default_factory=list)
+    contract_files: list[str] = field(default_factory=list)
+    searched: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "role": self.role,
+            "expected_output": str(self.expected_output) if self.expected_output else None,
+            "handshake": self.handshake,
+            "brief_path": str(self.brief_path) if self.brief_path else None,
+            "output_mtime": self.output_mtime,
+            "brief_mtime": self.brief_mtime,
+            "audit_sessions": list(self.audit_sessions),
+            "contract_files": list(self.contract_files),
+            "searched": list(self.searched),
+        }
+
+    def _corroboration(self) -> list[str]:
+        lines: list[str] = []
+        if self.audit_sessions:
+            lines.append(
+                f"  - blind-session audit log(s) recording role {self.role!r} "
+                f"for this task: {', '.join(self.audit_sessions)}"
+            )
+        if self.contract_files:
+            shown = ", ".join(self.contract_files[:5])
+            more = "" if len(self.contract_files) <= 5 else f" (+{len(self.contract_files) - 5} more)"
+            lines.append(f"  - test file(s) naming this task: {shown}{more}")
+        return lines
+
+    def describe(self) -> str:
+        """The operator-facing advisory. Names the artifact, states what was
+        searched, and never claims more than was observed."""
+        expected = str(self.expected_output) if self.expected_output else "<none mapped>"
+        searched = ", ".join(self.searched) or "(nothing)"
+
+        if self.handshake == "present":
+            return f"handshake report {expected} is present and current."
+
+        if self.handshake == "unmapped":
+            return (
+                f"no completion artifact is mapped for role {self.role!r}, so "
+                f"there is nothing to look for and completion cannot be "
+                f"detected. Add a mapping in `_expected_manual_output`."
+            )
+
+        if self.handshake == "stale":
+            return "\n".join([
+                f"blind-TDD {self.role} handshake for task {self.task_id!r} is STALE, "
+                f"not missing.",
+                f"  looked for: {expected}",
+                f"  found it, written {_fmt_mtime(self.output_mtime)}",
+                f"  but the brief {self.brief_path} was re-staged "
+                f"{_fmt_mtime(self.brief_mtime)}, which is later.",
+                "",
+                "This means the agent RAN BEFORE THE BRIEF WAS RE-STAGED — it does "
+                "not mean it never ran, and the existing report may still be a "
+                "complete answer to this brief.",
+                "Remedy: if the task spec has not changed since the report was "
+                f"written, delete {self.brief_path} to accept it; if it has "
+                "changed, re-run the agent so the report is rewritten.",
+            ])
+
+        # absent
+        lines = [
+            f"blind-TDD {self.role} handshake for task {self.task_id!r} was NOT FOUND.",
+            f"  looked for: {expected}",
+            f"  searched:   {searched}",
+            "",
+            "That file is what this check tests. It is not evidence that no agent "
+            "ran — it is the record that fixes WHEN the tests were written "
+            "relative to the code, which nothing else in the repo can establish "
+            "after the fact.",
+        ]
+        corroboration = self._corroboration()
+        if corroboration:
+            lines += [
+                "",
+                "Traces of a run WERE found, so the likely fault is a missing "
+                "handshake rather than a missing agent:",
+                *corroboration,
+                "",
+                "These do not close the red phase on their own: a blind session "
+                "that ran AFTER the implementation leaves exactly the same two "
+                "traces as one that ran before it.",
+            ]
+        else:
+            lines += [
+                "",
+                "No audit log and no test file naming this task were found either.",
+            ]
+        if self.brief_path is not None:
+            lines += ["", f"Brief: {self.brief_path}"]
+        return "\n".join(lines)
+
+
+def _fmt_mtime(ts: float | None) -> str:
+    if ts is None:
+        return "(unknown)"
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+def gather_manual_evidence(
+    *,
+    role: str,
+    task_id: str,
+    inputs: dict | None = None,
+    brief_path: Path | None = None,
+    test_dirs: list | None = None,
+    audit_dir: Path | None = None,
+) -> ManualEvidence:
+    """Collect what can be observed about a hand-run agent for one task."""
+    inputs = inputs or {}
+    expected_output = _expected_manual_output(role, task_id, inputs)
+    test_dirs = list(test_dirs or inputs.get("test_dirs") or [])
+
+    searched = []
+    if expected_output is not None:
+        searched.append(str(expected_output))
+    searched.append(str((audit_dir or _AUDIT_DIR) / "*.jsonl"))
+    searched.extend(str(Path(d)) for d in test_dirs)
+
+    if expected_output is None:
+        handshake = "unmapped"
+        output_mtime = None
+    elif not expected_output.exists():
+        handshake = "absent"
+        output_mtime = None
+    else:
+        output_mtime = expected_output.stat().st_mtime
+        brief_exists = brief_path is not None and brief_path.exists()
+        if not brief_exists:
+            handshake = "present"
+        elif output_mtime >= brief_path.stat().st_mtime:
+            handshake = "present"
+        else:
+            handshake = "stale"
+
+    brief_mtime = (
+        brief_path.stat().st_mtime
+        if brief_path is not None and brief_path.exists()
+        else None
+    )
+
+    return ManualEvidence(
+        task_id=task_id,
+        role=role,
+        expected_output=expected_output,
+        handshake=handshake,
+        brief_path=brief_path,
+        output_mtime=output_mtime,
+        brief_mtime=brief_mtime,
+        audit_sessions=_audit_sessions_for(task_id, role, audit_dir),
+        contract_files=_contract_files_for(task_id, test_dirs),
+        searched=searched,
+    )
+
+
+def record_writer_handshake(
+    task_id: str,
+    triage: dict,
+    *,
+    triage_dir: Path | None = None,
+) -> Path:
+    """Write the red-phase handshake report a hand-spawned writer must leave.
+
+    The supported completion path for a writer dispatched outside the
+    orchestrator (Agent tool, fresh session). Without it the writer has no
+    way to finish the protocol, and every run it makes is reported as though
+    it never happened.
+
+    This is not an unchecked assertion by the agent about its own work: the
+    orchestrator loads this report in `run_red_phase` step 5 and hands it to
+    `verify_coverage`, which requires every acceptance criterion to be
+    answered either by a `Covers: AC-N` tag on a test that exists on disk or
+    by a `needs_human` entry here. A report that overclaims fails the very
+    check it was written for.
+
+    Raises ValueError on a report that is not shaped like a triage report,
+    so a malformed handshake fails here rather than as a confusing JSON error
+    inside the red phase.
+    """
+    if not isinstance(triage, dict):
+        raise ValueError("triage report must be a dict")
+    entries = triage.get("triage")
+    if not isinstance(entries, list):
+        raise ValueError("triage report must have a 'triage' list")
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not entry.get("criterion"):
+            raise ValueError(
+                f"triage entry {i} must be a dict with a 'criterion' key"
+            )
+
+    triage_dir = Path(triage_dir) if triage_dir is not None else (
+        Path(".themis") / "blind_tdd" / "triage"
+    )
+    triage_dir.mkdir(parents=True, exist_ok=True)
+    path = triage_dir / f"{task_id}.json"
+    payload = dict(triage)
+    payload.setdefault("task", task_id)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Pluggable agent spawner interface
 # ---------------------------------------------------------------------------
 
@@ -230,17 +562,22 @@ class ManualSpawner:
         # as fresh completion (false green). When no brief is on disk yet,
         # mere existence is sufficient (typical first-time-after-completion
         # case where the orchestrator is invoked again from a clean state).
-        expected_output = _expected_manual_output(role, task_id, inputs)
-        output_is_fresh = (
-            expected_output is not None
-            and expected_output.exists()
-            and (
-                not brief_path.exists()
-                or expected_output.stat().st_mtime >= brief_path.stat().st_mtime
-            )
+        #
+        # `gather_manual_evidence` splits the not-complete case in two —
+        # "absent" and "stale" — because they are different problems with
+        # different remedies, and it also collects the traces a hand-run agent
+        # leaves so the advisory can report findings instead of asserting that
+        # nobody ran. See ManualEvidence's docstring.
+        evidence = gather_manual_evidence(
+            role=role,
+            task_id=task_id,
+            inputs=inputs,
+            brief_path=brief_path,
+            test_dirs=inputs.get("test_dirs"),
         )
-        if output_is_fresh:
-            # Clean up the stale brief, if any.
+        expected_output = evidence.expected_output
+        if evidence.handshake == "present":
+            # Clean up the consumed brief, if any.
             if brief_path.exists():
                 try:
                     brief_path.unlink()
@@ -250,12 +587,32 @@ class ManualSpawner:
                 "success": True,
                 "manual_mode": False,
                 "manual_completed": True,
+                "manual_state": "complete",
                 "agent_id": f"manual-{role}-{task_id}",
                 "output_files": [str(expected_output)],
+                "evidence": evidence.to_dict(),
                 "message": (
                     f"Manual spawn completed: {expected_output} exists; "
                     f"proceeding to verification."
                 ),
+            }
+
+        if evidence.handshake == "stale":
+            # Do NOT rewrite the brief here. Rewriting stamps it with a fresh
+            # mtime, which pushes it past the report again on every single
+            # gate run — a report that is once stale could never become
+            # current, no matter what the operator did short of re-running
+            # the agent. Leaving the brief untouched keeps the two timestamps
+            # in the message stable and makes the documented remedy (delete
+            # the brief to accept the report) actually work.
+            return {
+                "success": False,
+                "manual_mode": True,
+                "manual_state": "stale",
+                "brief_path": str(brief_path),
+                "output_files": [str(expected_output)] if expected_output else [],
+                "evidence": evidence.to_dict(),
+                "message": evidence.describe(),
             }
 
         # Step 2 is what installs the path guard and denies Bash. Never guess
@@ -274,6 +631,34 @@ class ManualSpawner:
                 f"   Blindness would NOT be enforced: Bash stays available and the",
                 f"   PreToolUse path guard is never installed. Add a template for this",
                 f"   role to `blind_tdd.session.ROLE_SETTINGS_TEMPLATES` before running.",
+            ]
+
+        # The brief used to end "Delete this brief file to signal completion."
+        # Deletion is not the signal and never was — the spawner looks for the
+        # role's output file, and a writer that followed the brief to the
+        # letter still came back reported as never having run. Say what is
+        # actually checked, and name the path.
+        if expected_output is not None:
+            completion_step = [
+                f"4. **Write the completion artifact — this, and only this, is what",
+                f"   the orchestrator checks:**",
+                f"",
+                f"       {expected_output}",
+                f"",
+                f"   It must exist and be no older than this brief. Nothing else",
+                f"   closes the phase: committed test files and the session audit",
+                f"   log are evidence you ran, but neither records WHEN you ran",
+                f"   relative to the implementation, which is the whole claim.",
+                f"   A `test_writer` can write it with",
+                f"   `blind_tdd.orchestrator.record_writer_handshake(task_id, triage)`.",
+                f"5. Delete this brief file (housekeeping — the orchestrator does it",
+                f"   for you on the next run once the artifact above is in place).",
+            ]
+        else:
+            completion_step = [
+                f"4. **No completion artifact is mapped for role `{role}`** — this",
+                f"   phase cannot be detected as finished. Add a mapping in",
+                f"   `blind_tdd.orchestrator._expected_manual_output` first.",
             ]
 
         brief_lines = [
@@ -297,19 +682,17 @@ class ManualSpawner:
             f"1. Copy the above inputs into a fresh Claude Code session.",
             *step_two,
             f"3. Run the agent.",
-            f"4. Verify the output files were created.",
-            f"5. Delete this brief file to signal completion.",
+            *completion_step,
         ]
         brief_path.write_text("\n".join(brief_lines), encoding="utf-8")
 
         return {
             "success": False,  # human has to complete it
             "manual_mode": True,
+            "manual_state": "pending",
             "brief_path": str(brief_path),
-            "message": (
-                f"Manual spawn: wrote brief to {brief_path}. "
-                f"Run the agent, then re-invoke the orchestrator."
-            ),
+            "evidence": evidence.to_dict(),
+            "message": evidence.describe(),
         }
 
 
@@ -444,7 +827,10 @@ class BlindTddOrchestrator:
         if spawn_result.get("manual_mode"):
             return RedPhaseResult(
                 passed=False,
-                reason="manual spawn requested — complete the brief and re-run",
+                reason=(
+                    (spawn_result.get("message") or "").strip()
+                    or "manual spawn requested — complete the brief and re-run"
+                ),
                 spawn_result=spawn_result,
             )
 
@@ -617,7 +1003,10 @@ class BlindTddOrchestrator:
         if spawn_result.get("manual_mode"):
             return GreenPhaseResult(
                 passed=False,
-                reason="manual spawn requested — complete the brief and re-run",
+                reason=(
+                    (spawn_result.get("message") or "").strip()
+                    or "manual spawn requested — complete the brief and re-run"
+                ),
                 spawn_result=spawn_result,
             )
 
@@ -844,7 +1233,10 @@ class BlindTddOrchestrator:
         if spawn_result.get("manual_mode"):
             return RedPhaseResult(
                 passed=False,
-                reason="manual spawn requested — complete the brief and re-run",
+                reason=(
+                    (spawn_result.get("message") or "").strip()
+                    or "manual spawn requested — complete the brief and re-run"
+                ),
                 spawn_result=spawn_result,
             )
 

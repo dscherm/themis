@@ -346,7 +346,21 @@ Call `run_blind_tdd_gate(config)` from your script (Step 4). With `spawner: "man
 2. The spawner writes `.themis/blind_tdd/pending/test_writer-<task_id>.md` containing the full prompt + task spec as a JSON context block.
 3. The gate returns `manual_mode=True` and (under `warn`) passes.
 4. You open that brief in a fresh Claude Code session, copy the prompt, and run it with the blind-writer settings at `<themis>/templates/blind_tdd/settings.blind-writer.json`.
-5. The agent writes test files under `tests/contracts/` and drops `.themis/blind_tdd/triage/<task_id>.json`.
+5. The agent writes test files under `tests/contracts/` and drops
+   `.themis/blind_tdd/triage/<task_id>.json`. **That report — not the test
+   files, and not deleting the brief — is what completes the phase.** A
+   writer can write it with
+   `blind_tdd.orchestrator.record_writer_handshake(task_id, triage)`.
+
+   This matters most when you dispatch the writer some way *other* than the
+   brief — the Agent tool, a fresh session you drove yourself. Such a writer
+   does everything right, commits a blind contract, and never touches the
+   handshake; without it the gate keeps reporting the phase as unfinished on
+   every re-invocation. The report is the only artifact that records **when**
+   the tests were written relative to the code, and neither a committed test
+   file nor the session audit log can stand in for it: a blind session that
+   ran *after* the implementation leaves exactly the same traces as one that
+   ran before it.
 6. You re-run the gate — this time it verifies coverage, saves red state, and tells you to implement.
 7. You (or the implementing agent) write the code.
 8. The next gate run finds the red state → kicks off the green phase → you run the runner agent manually the same way → final pass/fail lands.
@@ -396,7 +410,25 @@ The gate fails under strict enforcement. If the implementer believes a specific 
 
 **"task failed blind-tdd schema validation"** — run `python -m blind_tdd.lint_tasks plan.md` and fix the errors. Common issues: missing `public_surface.module`, criterion id that isn't `AC-\d+`, empty `acceptance_criteria`.
 
-**"manual spawn requested — complete the brief and re-run"** — the brief is at `.themis/blind_tdd/pending/<role>-<task_id>.md`. Run the agent, verify the output files land where the brief says, then re-run the gate.
+**"handshake for task ... was NOT FOUND"** — the role's completion artifact
+is missing. The advisory names the exact path it looked for, the locations it
+searched, and any traces of a run it did find (a blind-session audit log for
+the task, test files naming it). Read those traces first: if they are present,
+an agent ran and only the handshake is missing — write the report and re-run
+the gate, don't re-run the agent. If they are absent, the advisory says so
+explicitly.
+
+This advisory deliberately does **not** claim that no agent ran. It cannot
+know that, and a version of it that said so was wrong on five consecutive
+hand-dispatched beads.
+
+**"handshake for task ... is STALE, not missing"** — the report exists but
+predates the brief that asked for it, which happens when a brief is re-staged
+after the work was done. The work may be complete. If the task spec hasn't
+changed since the report was written, delete the brief to accept it; if it
+has, re-run the agent so the report is rewritten. The brief is left untouched
+in this state on purpose — re-stamping it each run would push it past the
+report again every time, making "stale" permanent.
 
 **Blindness violation in the audit log** — the writer agent attempted to read a blocked path. The brief's inputs weren't set up correctly, or the hook isn't wired. Check `.themis/blind_audit/<session_id>.jsonl` for the exact blocked tool call.
 

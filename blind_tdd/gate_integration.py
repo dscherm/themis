@@ -772,16 +772,34 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
             # "brief staged, run the agent, re-invoke the gate".
             is_manual_pending = bool((red.spawn_result or {}).get("manual_mode"))
             if is_manual_pending:
+                # Report the spawner's finding verbatim: it names the artifact
+                # it looked for and lists the traces of a run it did or did not
+                # see. The old text said only "run the writer agent", which
+                # reads as a claim that no writer ran — a claim this check has
+                # no evidence for, and one that was wrong on every bead
+                # dispatched by hand through the Agent tool.
+                spawn = red.spawn_result or {}
                 return BlindGateResult(
                     passed=True,
                     phase="red_pending",
                     message=(
-                        f"manual spawner staged brief for task {task_id!r} at "
-                        f"{(red.spawn_result or {}).get('brief_path', '<unknown>')}. "
-                        f"Run the writer agent and re-invoke the gate to continue."
+                        (spawn.get("message") or "").strip()
+                        or (
+                            f"manual spawner staged brief for task {task_id!r} at "
+                            f"{spawn.get('brief_path', '<unknown>')}."
+                        )
+                    ),
+                    reason=(
+                        "red_handshake_stale"
+                        if spawn.get("manual_state") == "stale"
+                        else "red_handshake_missing"
                     ),
                     task_id=task_id,
-                    details={"spawn_result": red.spawn_result},
+                    details={
+                        "spawn_result": spawn,
+                        "manual_state": spawn.get("manual_state"),
+                        "evidence": spawn.get("evidence"),
+                    },
                 )
             fail = btd_cfg["enforcement"] == "strict"
             return BlindGateResult(
