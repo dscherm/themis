@@ -261,6 +261,55 @@ def _red_state_path(task_id: str) -> Path:
     return Path(".themis") / "blind_tdd" / "red_state" / f"{task_id}.json"
 
 
+def _green_report_path(task_id: str) -> Path:
+    return Path(".themis") / "blind_tdd" / "green_report" / f"{task_id}.json"
+
+
+def completed_green_report(task_id: str) -> dict | None:
+    """The green report that proves this task's red phase was already verified.
+
+    A green report is not a trace left lying around. It is written at the end
+    of `run_green_phase`, which cannot be reached without a sealed red_state
+    whose recorded test-file hashes still match the tree. So its existence
+    records something no scan can reconstruct afterwards: a red baseline was
+    sealed BEFORE the implementation and survived to green intact. That is the
+    same temporal fact the writer handshake exists to fix, arriving by a
+    different route.
+
+    It is needed because `clear_red_state` deletes the seal on every green
+    pass, so a completed task looks on disk exactly like one that never
+    started: re-invoking the gate re-enters the red phase and demands a
+    handshake for work already verified. Measured against the real records in
+    the in-the-loop-learning repo, TD189 and TD193 — 792 and 807 passing
+    tests — both did precisely that.
+
+    Deliberately narrow, because a green report is evidence that THIS task's
+    red phase was already checked and never a licence to skip checking one
+    that was not:
+
+      * the report must name this task in its own `task` field, so a report
+        filed under another id exempts nothing;
+      * `overall` must be `"pass"` — a recorded failure is not a completion;
+      * unreadable or malformed JSON returns None and the red phase proceeds.
+
+    Returns the report when it closes the task, else None.
+    """
+    path = _green_report_path(task_id)
+    if not path.exists():
+        return None
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    if str(report.get("task", "")).strip() != task_id.strip():
+        return None
+    if str(report.get("overall", "")).strip().lower() != "pass":
+        return None
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Seal-record integrity (optional HMAC over the red-state baseline)
 #
@@ -753,6 +802,32 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
     red_state = load_red_state(task_id)
 
     if red_state is None:
+        # A green pass clears the seal, so "no red_state" means either "never
+        # started" or "already finished" — and the red phase must not be
+        # re-entered for the second. Checking the task's own green report
+        # separates them; see `completed_green_report` for why that report is
+        # evidence of a verified red phase and not merely a trace of one.
+        done = completed_green_report(task_id)
+        if done is not None:
+            return BlindGateResult(
+                passed=True,
+                phase="green",
+                message=(
+                    f"task {task_id!r} is already complete: green report at "
+                    f"{_green_report_path(task_id)} records "
+                    f"{done.get('tests_passed', 0)} test(s) passing against the "
+                    f"sealed red baseline, which was cleared when it passed. "
+                    f"No red phase is re-run and no handshake is required."
+                ),
+                reason="already_verified",
+                task_id=task_id,
+                details={
+                    "green_report_path": str(_green_report_path(task_id)),
+                    "tests_passed": done.get("tests_passed"),
+                    "tests_failed": done.get("tests_failed"),
+                },
+            )
+
         # ---- RED PHASE ----
         orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
         if orch_error is not None:
