@@ -354,17 +354,48 @@ def test_lint_no_tasks_is_ok():
 
 
 def test_lint_preflight_findings_surface():
-    """A task with a surface-coverage gap should generate a preflight finding."""
+    """A task with a surface-coverage gap should generate a preflight finding,
+    kinded by the check that raised it rather than a flat "preflight"."""
     with tempfile.TemporaryDirectory() as td:
         with _chdir(Path(td)):
             t = _clean_task()
             t["public_surface"]["adds"].append("Uncovered.method()")
             p = _write_plan(Path(td), [t])
             result = lint_plan_file(p)
-            preflight_findings = [f for f in result.findings if f.kind == "preflight"]
+            preflight_findings = [f for f in result.findings
+                                  if f.kind.startswith("preflight_")]
             assert len(preflight_findings) >= 1
             assert any("Uncovered" in f.message or "method" in f.message
                        for f in preflight_findings)
+            assert any(f.kind == "preflight_surface" for f in preflight_findings)
+            assert not any(f.kind == "preflight" for f in result.findings)
+
+
+def test_lint_preflight_kinds_vary_per_check():
+    """TD195/AC-5 prerequisite. Every preflight finding used to be flattened
+    to kind="preflight", contradicting LintFinding.kind's own docstring
+    ("preflight_<name>") and making an undeclared-surface warning
+    indistinguishable from a subjective-wording nit inside one 600-finding
+    plan lint. A task tripping two DIFFERENT checks must produce two
+    different kinds."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            t = _clean_task()
+            # (1) surface check: an `adds` entry no criterion mentions.
+            t["public_surface"]["adds"].append("Uncovered.method()")
+            # (2) subjective check: a `then` clause full of feel words.
+            t["acceptance_criteria"].append({
+                "id": "AC-9",
+                "given": "the thing exists",
+                "when": "it is used",
+                "then": "it feels smooth and nice",
+            })
+            p = _write_plan(Path(td), [t])
+            result = lint_plan_file(p)
+            kinds = {f.kind for f in result.findings if f.kind.startswith("preflight_")}
+            assert "preflight_surface" in kinds
+            assert "preflight_subjective" in kinds
+            assert len(kinds) >= 2
 
 
 def test_lint_historical_stale_check():

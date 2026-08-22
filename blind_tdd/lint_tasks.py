@@ -334,12 +334,17 @@ def _preflight_findings(task: dict, config: dict) -> list[LintFinding]:
     result = preflight_task(task, warn_config)
     task_id = str(task.get("id", "?"))
     out: list[LintFinding] = []
-    for w in result.warnings:
+    # One kind PER CHECK ("preflight_public_api", "preflight_subjective", …),
+    # which is what LintFinding.kind's own docstring says. Flattening every
+    # preflight complaint to a single "preflight" kind is how a true
+    # undeclared-surface signal became indistinguishable from the other 600
+    # advisory findings in one plan lint.
+    for f in result.findings:
         out.append(LintFinding(
             task_id=task_id,
-            kind="preflight",
+            kind=f"preflight_{f.check}",
             severity="warning",
-            message=w,
+            message=f.message,
         ))
     return out
 

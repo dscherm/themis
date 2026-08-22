@@ -520,6 +520,13 @@ class BlindGateResult:
     reason: str = ""
     task_id: str | None = None
     details: dict = field(default_factory=dict)
+    # Preflight complaints for THIS task, carried whatever the outcome.
+    # Under `preflight: "warn"` preflight never blocks, so before TD195 its
+    # warnings were computed and thrown away unless the strict branch fired
+    # — the "public_api.md does not mention <module>" signal existed on
+    # every gate run and reached nobody at dispatch time. Populated
+    # unconditionally by `run_blind_tdd_gate`; the caller prints it.
+    preflight_warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +678,23 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
 
     Returns a BlindGateResult. Never raises — any internal failure is
     represented as `passed=False, phase="error"` with a reason.
+
+    Thin wrapper over `_run_blind_tdd_gate` for one reason: preflight is
+    computed in the middle of that function and the result is returned from
+    a dozen places after it. Collecting the warnings through a sink and
+    attaching them here is what makes "the caller always sees them" a
+    property of the wrapper rather than a promise every return statement
+    has to keep.
     """
+    sink: list[str] = []
+    result = _run_blind_tdd_gate(config, sink)
+    if sink and not result.preflight_warnings:
+        result.preflight_warnings = list(sink)
+        result.details.setdefault("preflight_warnings", list(sink))
+    return result
+
+
+def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateResult:
     btd_cfg = get_blind_tdd_config(config)
 
     if not btd_cfg["enabled"]:
@@ -778,6 +801,9 @@ def run_blind_tdd_gate(config: dict) -> BlindGateResult:
     # Preflight: structural quality check before we burn API budget.
     # Controlled by gate.blind_tdd.preflight = strict | warn | off (default strict).
     preflight = preflight_task(task, config)
+    # Unconditional: under "warn" mode preflight.ready is always True, and
+    # the strict branch below is the only place these were ever read.
+    preflight_sink.extend(preflight.warnings)
     if not preflight.ready:
         # strict mode, at least one check failed
         fail = btd_cfg["enforcement"] == "strict"

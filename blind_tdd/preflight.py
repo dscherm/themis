@@ -11,7 +11,9 @@ spawn:
      be mentioned by at least one criterion's `when` or `then`
   3. Criterion observability — every `then` must contain a numeric
      literal, a comparator/verb word, or an exception class reference
-  4. public_api.md exists and mentions the module
+  4. public_api.md exists and DECLARES the module — a heading names
+     it, in either spelling, with or without a trailing title. A
+     mention in prose does not count; see `public_api_index`.
   5. Configured test directories exist
 
 ## Enforcement modes
@@ -48,6 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from .public_api_index import declares_module
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -59,12 +63,35 @@ MODE_OFF = "off"
 _VALID_MODES = {MODE_STRICT, MODE_WARN, MODE_OFF}
 
 
+# Check names, one per `_check_*` helper. They travel with each finding so a
+# consumer can tell a missing public-api section from a subjective `then`
+# clause without parsing the message prose — `lint_tasks` turns them into
+# `preflight_<check>` finding kinds, which is what its LintFinding.kind
+# docstring promised all along.
+CHECK_SUBJECTIVE = "subjective"
+CHECK_SURFACE = "surface"
+CHECK_OBSERVABILITY = "observability"
+CHECK_PUBLIC_API = "public_api"
+CHECK_TEST_DIRS = "test_dirs"
+
+
+@dataclass
+class PreflightFinding:
+    """One preflight complaint, tagged with the check that raised it."""
+    check: str
+    message: str
+
+
 @dataclass
 class PreflightResult:
     ready: bool
     mode: str = MODE_STRICT
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Every finding, whatever mode put it in `errors` or `warnings`, with
+    # its originating check. `errors`/`warnings` stay plain strings so
+    # existing callers keep working.
+    findings: list[PreflightFinding] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +99,9 @@ class PreflightResult:
             "mode": self.mode,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
+            "findings": [
+                {"check": f.check, "message": f.message} for f in self.findings
+            ],
         }
 
 
@@ -286,7 +316,13 @@ def _check_public_api_file(task: dict, config: dict) -> list[str]:
     except OSError as e:
         return [f"could not read {api_file!r}: {e}"]
 
-    if module not in content:
+    # Heading-aware, not substring. `module` may be written either way
+    # ("server/unit_store.py" or "server.unit_store") and the document may
+    # head its section either way, with or without a trailing title —
+    # `declares_module` normalises both spellings to one key. A name that
+    # appears only in prose still warns: a mention is not a declared
+    # surface (see public_api_index's module docstring).
+    if not declares_module(content, module):
         return [
             f"public_api_file {api_file!r} does not mention {module!r}. "
             f"The blind writer needs this file to understand the surface "
@@ -364,23 +400,30 @@ def preflight_task(task: dict, config: dict) -> PreflightResult:
 
     # Collect findings from every check — structural problems are
     # reported independently (each can fail without masking others).
-    findings: list[str] = []
-    findings.extend(_check_subjective_language(task))
-    findings.extend(_check_public_surface_coverage(task))
-    findings.extend(_check_criterion_observability(task))
-    findings.extend(_check_public_api_file(task, config))
-    findings.extend(_check_test_dirs_exist(config))
+    tagged: list[PreflightFinding] = []
+    for check, messages in (
+        (CHECK_SUBJECTIVE, _check_subjective_language(task)),
+        (CHECK_SURFACE, _check_public_surface_coverage(task)),
+        (CHECK_OBSERVABILITY, _check_criterion_observability(task)),
+        (CHECK_PUBLIC_API, _check_public_api_file(task, config)),
+        (CHECK_TEST_DIRS, _check_test_dirs_exist(config)),
+    ):
+        tagged.extend(PreflightFinding(check=check, message=m) for m in messages)
+
+    messages = [f.message for f in tagged]
 
     if mode == MODE_WARN:
         return PreflightResult(
             ready=True,
             mode=mode,
-            warnings=findings,
+            warnings=messages,
+            findings=tagged,
         )
 
     # strict
     return PreflightResult(
-        ready=len(findings) == 0,
+        ready=len(tagged) == 0,
         mode=mode,
-        errors=findings,
+        errors=messages,
+        findings=tagged,
     )
