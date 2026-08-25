@@ -41,6 +41,7 @@ See `AgentSpawner` below.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -1792,3 +1793,98 @@ class BlindTddOrchestrator:
                 f.write(json.dumps(data, ensure_ascii=False) + "\n")
         except OSError:
             pass  # observation failures never block the gate
+
+
+# ---------------------------------------------------------------------------
+# CLI — a Bash-callable path to the same recorder Python callers already use
+# ---------------------------------------------------------------------------
+#
+# `record_writer_handshake` (TD150) has existed since the first time this
+# defect was measured: a writer dispatched outside the orchestrator's own
+# spawn (Agent tool, fresh session) produces real tests but never touches
+# `.themis/blind_tdd/triage/<task_id>.json`, so the tier-2 gate reports "the
+# writer agent has not run" about a writer that plainly did. That recorder
+# was always reachable — but only via a Python import, which is friction an
+# orchestrator driving a shell (not a Python REPL) has to rediscover and
+# hand-roll every time. It was rediscovered as a gap on TD274: of five beads
+# the checker flagged, three (TD271, TD275's second pass, TD278) were the
+# bridge's separate post-implementation VALIDATE phase and were correctly
+# flagged — the checker earning its keep, not misfiring. One (TD272) was a
+# genuine pre-implementation writer, dispatched by hand, whose agent was
+# killed mid-task before it reached the handshake step; nobody had a
+# one-line way to close the loop on its behalf. This CLI is that one line,
+# matching the `python -c "import blind_tdd.session as s; s.activate(...)"`
+# idiom `docs/bridge-protocol.md` §4b½ already uses for the rest of a manual
+# spawn, so recording the handshake costs the same one shell call as arming
+# or disarming the blindness guard.
+#
+# This does NOT change what the gate accepts as evidence, and must not: see
+# `traces-of-a-run-cannot-establish-its-ordering.md` and
+# `test_writer_handshake_evidence.py` for why ordering can only be
+# established by an artifact written while it was true, never inferred from
+# what a writer leaves behind. `record_handshake` still validates the
+# payload's shape before writing it, so this CLI cannot write a report
+# `verify_coverage` cannot check.
+
+
+def _cli_record_writer_handshake(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m blind_tdd.orchestrator record-writer-handshake",
+        description=(
+            "Write the red-phase (test_writer) handshake for a writer that "
+            "ran outside the orchestrator's own spawn — e.g. an Agent-tool "
+            "subagent dispatched by hand — and so never wrote "
+            ".themis/blind_tdd/triage/<task_id>.json itself. Run this "
+            "immediately after such a writer finishes, BEFORE implementation "
+            "starts; the tier-2 gate only trusts this file because it is "
+            "written while 'the tests exist and the code does not' is true."
+        ),
+    )
+    ap.add_argument("task_id", help="Task id, e.g. TD272")
+    ap.add_argument(
+        "triage_json",
+        help=(
+            "Path to a JSON file shaped like the writer's triage report: "
+            '{"triage": [{"criterion": "AC-1", "status": "tested", ...}, '
+            '...]} — one entry per acceptance criterion, "needs_human" '
+            "entries included. Pass '-' to read the JSON from stdin."
+        ),
+    )
+    args = ap.parse_args(argv)
+
+    raw = sys.stdin.read() if args.triage_json == "-" else Path(args.triage_json).read_text(encoding="utf-8")
+    try:
+        triage = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"error: {args.triage_json} is not valid JSON: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        path = record_writer_handshake(args.task_id, triage)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"wrote {path}")
+    return 0
+
+
+_CLI_COMMANDS = {
+    "record-writer-handshake": _cli_record_writer_handshake,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] not in _CLI_COMMANDS:
+        print(
+            "usage: python -m blind_tdd.orchestrator "
+            f"{{{','.join(_CLI_COMMANDS)}}} ...",
+            file=sys.stderr,
+        )
+        return 2
+    return _CLI_COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
