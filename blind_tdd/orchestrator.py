@@ -1796,55 +1796,65 @@ class BlindTddOrchestrator:
 
 
 # ---------------------------------------------------------------------------
-# CLI — a Bash-callable path to the same recorder Python callers already use
+# CLI — a Bash-callable path to the recorders Python callers already use
 # ---------------------------------------------------------------------------
 #
-# `record_writer_handshake` (TD150) has existed since the first time this
-# defect was measured: a writer dispatched outside the orchestrator's own
-# spawn (Agent tool, fresh session) produces real tests but never touches
-# `.themis/blind_tdd/triage/<task_id>.json`, so the tier-2 gate reports "the
-# writer agent has not run" about a writer that plainly did. That recorder
-# was always reachable — but only via a Python import, which is friction an
-# orchestrator driving a shell (not a Python REPL) has to rediscover and
-# hand-roll every time. It was rediscovered as a gap on TD274: of five beads
-# the checker flagged, three (TD271, TD275's second pass, TD278) were the
-# bridge's separate post-implementation VALIDATE phase and were correctly
-# flagged — the checker earning its keep, not misfiring. One (TD272) was a
-# genuine pre-implementation writer, dispatched by hand, whose agent was
-# killed mid-task before it reached the handshake step; nobody had a
-# one-line way to close the loop on its behalf. This CLI is that one line,
-# matching the `python -c "import blind_tdd.session as s; s.activate(...)"`
-# idiom `docs/bridge-protocol.md` §4b½ already uses for the rest of a manual
-# spawn, so recording the handshake costs the same one shell call as arming
-# or disarming the blindness guard.
+# TWO different situations produce the same symptom (a tier-2 "the writer
+# agent has not run" yellow on a writer that plainly did) and need TWO
+# different, non-interchangeable fixes. Conflating them is exactly the
+# mistake `lessons/a-hand-spawned-blind-writer-leaves-no-handshake-seal-it-
+# yourself.md` documents Dan declining for TD188:
 #
-# This does NOT change what the gate accepts as evidence, and must not: see
+#   1. The writer ran to completion, just outside the orchestrator's own
+#      spawn (Agent-tool subagent, a prompt other than test_writer.md) — it
+#      can still speak in its own voice. `record-writer-handshake` below is
+#      that voice: it writes the SAME triage-report shape a managed writer
+#      would, as the writer's own first-person account, straight from
+#      `record_writer_handshake` (TD150). Use it only with a report the
+#      writer itself actually produced (or reported verbatim before it
+#      could write the file) — never content invented on its behalf.
+#   2. The writer did NOT reach its own last step — killed mid-task, an
+#      expired login, a crashed session (TD272, 2026-08-24: "killed by an
+#      expired login before it could commit"). There is no first-person
+#      report to relay, and writing one anyway is the forged-provenance
+#      move Dan rejected for TD188. `seal-red-state` below is the honest
+#      alternative the lesson prescribes: the ORCHESTRATOR seals the red
+#      state directly (`gate_integration.save_red_state`), signs the record
+#      as `"orchestrator, NOT the blind writer"`, and is forced to state WHY
+#      it knows the ordering held (`--ordering-evidence`) — the field the
+#      lesson calls load-bearing, because a seal that does not say is
+#      indistinguishable from the case with no evidence at all.
+#
+# Neither command changes what the gate ACCEPTS once a record exists: see
 # `traces-of-a-run-cannot-establish-its-ordering.md` and
 # `test_writer_handshake_evidence.py` for why ordering can only be
 # established by an artifact written while it was true, never inferred from
 # what a writer leaves behind. `record_handshake` still validates the
-# payload's shape before writing it, so this CLI cannot write a report
-# `verify_coverage` cannot check.
+# writer-voice payload's shape before writing it.
 
 
 def _cli_record_writer_handshake(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m blind_tdd.orchestrator record-writer-handshake",
         description=(
-            "Write the red-phase (test_writer) handshake for a writer that "
-            "ran outside the orchestrator's own spawn — e.g. an Agent-tool "
-            "subagent dispatched by hand — and so never wrote "
-            ".themis/blind_tdd/triage/<task_id>.json itself. Run this "
-            "immediately after such a writer finishes, BEFORE implementation "
-            "starts; the tier-2 gate only trusts this file because it is "
-            "written while 'the tests exist and the code does not' is true."
+            "Write the red-phase (test_writer) handshake IN THE WRITER'S OWN "
+            "VOICE, for a writer that ran to completion outside the "
+            "orchestrator's own spawn (e.g. an Agent-tool subagent dispatched "
+            "by hand, or a prompt other than test_writer.md) and so never "
+            "wrote .themis/blind_tdd/triage/<task_id>.json itself. The "
+            "triage report you pass MUST be what that writer actually "
+            "produced/reported — never content composed on its behalf. If "
+            "the writer did NOT finish (killed mid-task, expired session), "
+            "there is no first-person report to relay: use seal-red-state "
+            "instead, which seals on the orchestrator's own authority and "
+            "says so."
         ),
     )
     ap.add_argument("task_id", help="Task id, e.g. TD272")
     ap.add_argument(
         "triage_json",
         help=(
-            "Path to a JSON file shaped like the writer's triage report: "
+            "Path to a JSON file shaped like the writer's own triage report: "
             '{"triage": [{"criterion": "AC-1", "status": "tested", ...}, '
             '...]} — one entry per acceptance criterion, "needs_human" '
             "entries included. Pass '-' to read the JSON from stdin."
@@ -1869,8 +1879,105 @@ def _cli_record_writer_handshake(argv: list[str]) -> int:
     return 0
 
 
+def _cli_seal_red_state(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m blind_tdd.orchestrator seal-red-state",
+        description=(
+            "Seal the red-phase state directly, on the ORCHESTRATOR's OWN "
+            "authority, for a task whose real test_writer agent cannot "
+            "complete its own handshake (killed mid-task, expired login, a "
+            "crashed session — TD272). This does NOT claim a managed "
+            "test_writer session produced a triage report: the sealed record "
+            "says 'orchestrator, NOT the blind writer' and requires you to "
+            "state why the before-implementation ordering is known. See "
+            "lessons/a-hand-spawned-blind-writer-leaves-no-handshake-seal-it-"
+            "yourself.md. If the writer DID finish and can speak for itself, "
+            "use record-writer-handshake instead — do not use this command "
+            "to compose a report on a finished writer's behalf."
+        ),
+    )
+    ap.add_argument("task_id", help="Task id, e.g. TD272")
+    ap.add_argument(
+        "--test-dir", dest="test_dirs", action="append", required=True,
+        help=(
+            "Directory to hash and seal as the red baseline (repeatable). "
+            "Every test file under it is sha256'd now; the green phase "
+            "later refuses the task if any of these files change before "
+            "the runner sees them."
+        ),
+    )
+    ap.add_argument(
+        "--ordering-evidence", required=True,
+        help=(
+            "REQUIRED, load-bearing (see the lesson). How you know the "
+            "tests were written before the implementation exists, stated "
+            "plainly enough that a later reader can grade it: strong "
+            "('implementation does not exist yet: N failed / M passed, "
+            "measured now against an empty src/ tree') or weak-but-honest "
+            "('inferred only from a killed session's partial commit; no "
+            "direct measurement'). Do not omit or hedge this — a seal that "
+            "does not say is indistinguishable from having no evidence."
+        ),
+    )
+    ap.add_argument(
+        "--why-not-the-writer", required=True,
+        help=(
+            "REQUIRED. Why the test_writer role itself could not close its "
+            "own handshake, e.g. 'agent killed by an expired login before "
+            "its last step'."
+        ),
+    )
+    ap.add_argument(
+        "--measured-at-commit", default=None,
+        help="Commit SHA the --ordering-evidence measurement was taken against, if any.",
+    )
+    ap.add_argument("--counts-failed", type=int, default=None,
+                     help="How many of the sealed tests failed when measured (optional).")
+    ap.add_argument("--counts-passed", type=int, default=None,
+                     help="How many of the sealed tests passed when measured (optional).")
+    args = ap.parse_args(argv)
+
+    test_dirs = [Path(d) for d in args.test_dirs]
+    hashes = _hash_test_files(test_dirs)
+    if not hashes:
+        print(
+            f"error: no test files found under {', '.join(args.test_dirs)} — "
+            "refusing to seal an empty baseline",
+            file=sys.stderr,
+        )
+        return 1
+
+    triage_report: dict = {
+        "sealed_by": "orchestrator, NOT the blind writer",
+        "why_not_the_writer": args.why_not_the_writer,
+        "ordering_evidence": args.ordering_evidence,
+    }
+    if args.measured_at_commit is not None:
+        triage_report["measured_at_commit"] = args.measured_at_commit
+    if args.counts_failed is not None or args.counts_passed is not None:
+        triage_report["counts"] = {
+            "failed": args.counts_failed,
+            "passed": args.counts_passed,
+        }
+
+    # Deferred import: gate_integration imports orchestrator at module load,
+    # so importing it back at module scope here would be circular. Both
+    # modules are fully loaded by the time this function actually runs.
+    from . import gate_integration as gi
+
+    gi.save_red_state(args.task_id, RedPhaseResult(
+        passed=True,
+        test_file_hashes=hashes,
+        triage_report=triage_report,
+    ))
+    path = gi._red_state_path(args.task_id)
+    print(f"sealed red state for {args.task_id} at {path} ({len(hashes)} test file(s) hashed)")
+    return 0
+
+
 _CLI_COMMANDS = {
     "record-writer-handshake": _cli_record_writer_handshake,
+    "seal-red-state": _cli_seal_red_state,
 }
 
 
