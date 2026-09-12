@@ -78,13 +78,20 @@ def _hash_file(path: Path) -> str:
 
 
 def _hash_test_files(test_dirs: list[Path]) -> dict[str, str]:
-    """Compute sha256 of every test file under the given dirs."""
+    """Compute sha256 of every test file under the given dirs.
+
+    A single FILE is accepted too, so a handshake can seal exactly the file its writer
+    produced. Sealing a whole directory stamps every older file in it with this
+    session's provenance -- on 2026-09-11 that would have claimed six earlier blind
+    files for a writer that touched one.
+    """
     hashes: dict[str, str] = {}
     for td in test_dirs:
         td = Path(td)
         if not td.exists():
             continue
-        for path in sorted(td.rglob("*")):
+        candidates = [td] if td.is_file() else sorted(td.rglob("*"))
+        for path in candidates:
             if not path.is_file():
                 continue
             if is_artifact_path(path):
@@ -1860,6 +1867,17 @@ def _cli_record_writer_handshake(argv: list[str]) -> int:
             "entries included. Pass '-' to read the JSON from stdin."
         ),
     )
+    ap.add_argument(
+        "--test-dir", dest="test_dirs", action="append", default=[],
+        help=(
+            "Directory whose test files to hash and seal alongside the writer's "
+            "report (repeatable). Without it a finished writer's handshake carries "
+            "no hashes at all, so nothing downstream can tell whether the blind "
+            "file was later edited -- seal-red-state seals, this did not, and the "
+            "path a writer that FINISHED is supposed to take was the one that left "
+            "no seal. Recorded under `writer_hash_test_files`."
+        ),
+    )
     args = ap.parse_args(argv)
 
     raw = sys.stdin.read() if args.triage_json == "-" else Path(args.triage_json).read_text(encoding="utf-8")
@@ -1869,13 +1887,24 @@ def _cli_record_writer_handshake(argv: list[str]) -> int:
         print(f"error: {args.triage_json} is not valid JSON: {e}", file=sys.stderr)
         return 1
 
+    if args.test_dirs:
+        hashes = _hash_test_files([Path(d) for d in args.test_dirs])
+        if not hashes:
+            print(f"error: no test files found under {', '.join(args.test_dirs)} — "
+                  "refusing to seal an empty set", file=sys.stderr)
+            return 1
+        triage = dict(triage)
+        triage["writer_hash_test_files"] = hashes
+        triage["sealed_by"] = "the blind writer's own report, hashes taken at relay time"
+
     try:
         path = record_writer_handshake(args.task_id, triage)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    print(f"wrote {path}")
+    sealed = f" ({len(triage['writer_hash_test_files'])} test file(s) sealed)" if args.test_dirs else ""
+    print(f"wrote {path}{sealed}")
     return 0
 
 
