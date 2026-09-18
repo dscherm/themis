@@ -81,6 +81,18 @@ VALID_TASK = {
     "public_surface": {"module": "src.foo", "adds": ["foo()"]},
 }
 
+# TD26: spawn_arbiter/process_challenge now require the caller to hand in
+# already-derived roots (blind_tdd.roots.derive_blocked_paths(...).to_record())
+# rather than running the arbiter unsealed. Tests below use a fixed stand-in
+# record — the derivation itself is blind_tdd.roots's job and is covered by
+# test_roots.py.
+SEALED_ROOTS = {
+    "blocked_paths": ["src/**", "examples/**", ".git/**", "data/generated/**"],
+    "roots": ["src", "examples"],
+    "languages": ["node"],
+    "method": "js-convention",
+}
+
 
 # ---------------------------------------------------------------------------
 # file_challenge
@@ -216,6 +228,7 @@ def test_spawn_arbiter_parses_ruling():
                 spawner=spawner,
                 arbiter_prompt="<arbiter prompt>",
                 task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
             )
             assert ruling is not None
             assert ruling.ruling == "upheld"
@@ -235,6 +248,7 @@ def test_spawn_arbiter_returns_none_when_spawn_fails():
             ruling = ch.spawn_arbiter(
                 challenge=chal, spawner=spawner,
                 arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
             )
             assert ruling is None
 
@@ -250,6 +264,7 @@ def test_spawn_arbiter_returns_none_when_no_output_file():
             ruling = ch.spawn_arbiter(
                 challenge=chal, spawner=spawner,
                 arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
             )
             assert ruling is None
 
@@ -269,8 +284,183 @@ def test_spawn_arbiter_rejects_unknown_verdict():
             ruling = ch.spawn_arbiter(
                 challenge=chal, spawner=spawner,
                 arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
             )
             assert ruling is None
+
+
+# ---------------------------------------------------------------------------
+# TD26 — the arbiter is now blind: spawn_arbiter opens a real blind_session
+# using the caller's derived roots (TD21), instead of spawning with no
+# session at all (the bug arbiter.md's own briefing never disclosed).
+# ---------------------------------------------------------------------------
+
+class _SessionCapturingSpawner:
+    """Records blind_tdd.session.current_session() at spawn time, then
+    behaves like StubSpawner (writes the ruling doc, returns success)."""
+
+    def __init__(self, ruling: dict):
+        self.ruling = ruling
+        self.captured_session: dict | None = None
+
+    def spawn(self, *, role: str, prompt_template: str, inputs: dict) -> dict:
+        from blind_tdd.session import current_session
+        self.captured_session = current_session()
+
+        challenge_id = inputs["challenge_id"]
+        out_dir = Path(".themis") / "blind_tdd" / "rulings"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ruling_doc = dict(self.ruling)
+        ruling_doc.setdefault("challenge_id", challenge_id)
+        (out_dir / f"{challenge_id}.json").write_text(
+            json.dumps(ruling_doc, indent=2), encoding="utf-8"
+        )
+        return {"success": True, "agent_id": "stub-arbiter"}
+
+
+def test_spawn_arbiter_activates_a_real_blind_session_with_derived_roots():
+    """AC-2: the arbiter spawns under a session using TD21's derived roots —
+    not the previous no-session-at-all behavior."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            chal = ch.file_challenge(
+                task_id="t", test_file="tests/a.py", test_name="n",
+                criterion="AC-1", argument="flaky",
+            )
+            spawner = _SessionCapturingSpawner(
+                {"ruling": "rejected", "reasoning": "fine", "criterion_affected": "AC-1"}
+            )
+            ruling = ch.spawn_arbiter(
+                challenge=chal, spawner=spawner,
+                arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
+            )
+            assert ruling is not None
+            # A session WAS active while spawner.spawn() ran.
+            assert spawner.captured_session is not None
+            assert spawner.captured_session["agent_role"] == "arbiter"
+            assert spawner.captured_session["blocked_paths"] == SEALED_ROOTS["blocked_paths"]
+
+            # And it is cleaned up afterwards, same as every other phase.
+            from blind_tdd.session import current_session
+            assert current_session() is None
+
+
+def test_spawn_arbiter_session_actually_refuses_an_implementation_read():
+    """AC-1/AC-2 end-to-end: while the arbiter's session is active, the real
+    path-guard hook refuses a read of a file under the derived roots — the
+    same claim arbiter.md makes in its own briefing, now actually true."""
+    import importlib.util
+
+    guard_path = _REPO / "templates" / "hooks" / "blind_tdd_path_guard.py"
+    spec = importlib.util.spec_from_file_location("_td26_guard", guard_path)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    checked: dict = {}
+
+    class _CheckingSpawner:
+        def spawn(self, *, role, prompt_template, inputs):
+            from blind_tdd.session import current_session
+            session = current_session()
+            allowed, reason = guard._check_path("src/widget.js", session)
+            checked["allowed"] = allowed
+            checked["reason"] = reason
+
+            challenge_id = inputs["challenge_id"]
+            out_dir = Path(".themis") / "blind_tdd" / "rulings"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{challenge_id}.json").write_text(
+                json.dumps({"ruling": "rejected", "reasoning": "x",
+                            "criterion_affected": "AC-1"}),
+                encoding="utf-8",
+            )
+            return {"success": True}
+
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            chal = ch.file_challenge(
+                task_id="t", test_file="tests/a.py", test_name="n",
+                criterion="AC-1", argument="x",
+            )
+            ruling = ch.spawn_arbiter(
+                challenge=chal, spawner=_CheckingSpawner(),
+                arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
+            )
+            assert ruling is not None
+            assert checked["allowed"] is False, checked.get("reason")
+            assert "blocked pattern" in checked["reason"]
+
+
+def test_spawn_arbiter_requires_nonempty_sealed_roots():
+    """No silent unsealed fallback: an empty/missing blocked_paths raises
+    rather than spawning the arbiter with nothing enforced."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            chal = ch.file_challenge(
+                task_id="t", test_file="a.py", test_name="n",
+                criterion="AC-1", argument="x",
+            )
+            spawner = StubSpawner(ruling={"ruling": "rejected", "reasoning": "x",
+                                           "criterion_affected": "AC-1"})
+            try:
+                ch.spawn_arbiter(
+                    challenge=chal, spawner=spawner,
+                    arbiter_prompt="", task_spec=VALID_TASK,
+                    sealed_roots={"blocked_paths": []},
+                )
+            except ValueError:
+                pass
+            else:
+                assert False, "expected ValueError for empty sealed_roots"
+            # Nothing was spawned — the fail-loud check happens before spawn.
+            assert spawner.spawned_inputs is None
+
+
+def test_spawn_arbiter_records_sealed_roots_on_the_ruling():
+    """AC-4: the produced Ruling records which roots were sealed."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            chal = ch.file_challenge(
+                task_id="t", test_file="a.py", test_name="n",
+                criterion="AC-1", argument="x",
+            )
+            spawner = StubSpawner(ruling={"ruling": "rejected", "reasoning": "x",
+                                           "criterion_affected": "AC-1"})
+            ruling = ch.spawn_arbiter(
+                challenge=chal, spawner=spawner,
+                arbiter_prompt="", task_spec=VALID_TASK,
+                sealed_roots=SEALED_ROOTS,
+            )
+            assert ruling.sealed_roots == SEALED_ROOTS
+            assert ruling.to_dict()["sealed_roots"] == SEALED_ROOTS
+
+
+def test_spawn_arbiter_returns_none_if_a_session_is_already_active():
+    """If a writer/runner session is already active (should not normally
+    overlap with an arbiter spawn), spawn_arbiter fails rather than running
+    the arbiter unsealed alongside it."""
+    from blind_tdd.session import activate, deactivate
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            chal = ch.file_challenge(
+                task_id="t", test_file="a.py", test_name="n",
+                criterion="AC-1", argument="x",
+            )
+            activate(agent_role="test_writer", task_id="other-task")
+            try:
+                spawner = StubSpawner(ruling={"ruling": "rejected", "reasoning": "x",
+                                               "criterion_affected": "AC-1"})
+                ruling = ch.spawn_arbiter(
+                    challenge=chal, spawner=spawner,
+                    arbiter_prompt="", task_spec=VALID_TASK,
+                    sealed_roots=SEALED_ROOTS,
+                )
+                assert ruling is None
+                assert spawner.spawned_inputs is None
+            finally:
+                deactivate()
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +562,7 @@ def test_process_challenge_upheld_happy_path():
                 task_spec=VALID_TASK,
                 spawner=spawner,
                 arbiter_prompt="",
+                sealed_roots=SEALED_ROOTS,
             )
             assert result.success
             assert result.action == "test_deleted"
@@ -396,6 +587,7 @@ def test_process_challenge_cap_exceeded_short_circuits():
                 task_spec=VALID_TASK,
                 spawner=spawner, arbiter_prompt="",
                 max_per_criterion=1,
+                sealed_roots=SEALED_ROOTS,
             )
             assert not result.success
             assert result.action == "cap_exceeded"
@@ -417,6 +609,7 @@ def test_process_challenge_records_observations():
                 task_id="t1", test_file=str(test_path), test_name="test_x",
                 criterion="AC-1", argument="I don't like it",
                 task_spec=VALID_TASK, spawner=spawner, arbiter_prompt="",
+                sealed_roots=SEALED_ROOTS,
             )
             obs_path = Path(".themis/observations.jsonl")
             assert obs_path.exists()
@@ -438,6 +631,7 @@ def test_process_challenge_arbiter_failure_reports_cleanly():
                 task_id="t1", test_file="a.py", test_name="a",
                 criterion="AC-1", argument="x",
                 task_spec=VALID_TASK, spawner=spawner, arbiter_prompt="",
+                sealed_roots=SEALED_ROOTS,
             )
             assert not result.success
             assert result.action == "arbiter_failed"
@@ -457,11 +651,33 @@ def test_process_challenge_ambiguous_escalates():
                 task_id="t1", test_file=str(test_path), test_name="test_x",
                 criterion="AC-1", argument="unclear",
                 task_spec=VALID_TASK, spawner=spawner, arbiter_prompt="",
+                sealed_roots=SEALED_ROOTS,
             )
             assert result.success
             assert result.action == "escalated_to_human"
             assert result.human_request_id is not None
             assert test_path.exists()
+
+
+def test_process_challenge_carries_sealed_roots_at_top_level():
+    """AC-4: a caller inspecting only the ChallengeResult (not the nested
+    Ruling) can still tell the challenge was arbitrated under a seal."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            test_path = Path("tests/contracts/test_x.py")
+            _write_test_file(test_path)
+            spawner = StubSpawner(ruling={
+                "ruling": "rejected", "reasoning": "fine",
+                "criterion_affected": "AC-1",
+            })
+            result = ch.process_challenge(
+                task_id="t1", test_file=str(test_path), test_name="test_x",
+                criterion="AC-1", argument="x",
+                task_spec=VALID_TASK, spawner=spawner, arbiter_prompt="",
+                sealed_roots=SEALED_ROOTS,
+            )
+            assert result.sealed_roots == SEALED_ROOTS
+            assert result.to_dict()["sealed_roots"] == SEALED_ROOTS
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +697,11 @@ def _run_all() -> int:
         test_spawn_arbiter_returns_none_when_spawn_fails,
         test_spawn_arbiter_returns_none_when_no_output_file,
         test_spawn_arbiter_rejects_unknown_verdict,
+        test_spawn_arbiter_activates_a_real_blind_session_with_derived_roots,
+        test_spawn_arbiter_session_actually_refuses_an_implementation_read,
+        test_spawn_arbiter_requires_nonempty_sealed_roots,
+        test_spawn_arbiter_records_sealed_roots_on_the_ruling,
+        test_spawn_arbiter_returns_none_if_a_session_is_already_active,
         test_apply_ruling_upheld_deletes_test_file,
         test_apply_ruling_rejected_keeps_test_file,
         test_apply_ruling_ambiguous_writes_human_request,
@@ -489,6 +710,7 @@ def _run_all() -> int:
         test_process_challenge_records_observations,
         test_process_challenge_arbiter_failure_reports_cleanly,
         test_process_challenge_ambiguous_escalates,
+        test_process_challenge_carries_sealed_roots_at_top_level,
     ]
     failed = 0
     for t in tests:
