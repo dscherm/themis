@@ -91,6 +91,7 @@ from pathlib import Path, PurePosixPath
 
 from . import session as _session
 from .artifacts import is_artifact_path
+from .orchestrator import SEALABLE_TEST_EXTENSIONS
 from .probes import (
     DEFAULT_SPAWNER,
     EncodingCheckResult,
@@ -558,7 +559,7 @@ def _hash_sandbox_tests(sandbox: Path) -> dict[str, str]:
         for p in sorted(d.rglob("*")):
             if is_artifact_path(p):
                 continue
-            if p.is_file() and p.suffix.lower() in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs"):
+            if p.is_file() and p.suffix.lower() in SEALABLE_TEST_EXTENSIONS:
                 rel = str(PurePosixPath(*p.relative_to(sandbox).parts))
                 hashes[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
     return hashes

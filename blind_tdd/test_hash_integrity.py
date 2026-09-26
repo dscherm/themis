@@ -340,6 +340,36 @@ def test_hash_test_files_ignores_non_test_extensions():
             assert any("a.py" in k for k in h.keys())
 
 
+def test_hash_test_files_seals_gdscript_but_not_json_fixtures():
+    """sb2d-lha: a Godot project's blind contract tests are .gd files, not
+    .py — `record-writer-handshake ... --test-dir tests/contracts` on such a
+    project must seal them instead of reporting "no test files found"."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            Path("tests/contracts").mkdir(parents=True)
+            Path("tests/contracts/test_sb2d_awa_kart_physics_blind.gd").write_text(
+                "extends GutTest\nfunc test_x():\n\tassert_true(true)\n",
+                encoding="utf-8",
+            )
+            Path("tests/contracts/fixture.json").write_text("{}", encoding="utf-8")
+            h = _hash_test_files([Path("tests/contracts")])
+            assert len(h) == 1
+            assert any(k.endswith(".gd") for k in h.keys())
+            assert not any(k.endswith(".json") for k in h.keys())
+
+
+def test_hash_test_files_still_seals_python_regression():
+    """Regression guard: unifying the extension set behind
+    SEALABLE_TEST_EXTENSIONS must not stop sealing plain .py test files."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            Path("tests").mkdir()
+            Path("tests/test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
+            h = _hash_test_files([Path("tests")])
+            assert len(h) == 1
+            assert any(k.endswith("test_a.py") for k in h.keys())
+
+
 def test_hash_test_files_handles_missing_directory():
     with tempfile.TemporaryDirectory() as td:
         with _chdir(Path(td)):

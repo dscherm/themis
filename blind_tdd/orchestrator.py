@@ -57,12 +57,30 @@ from xml.etree import ElementTree
 
 from .artifacts import is_artifact_path
 from .coverage import verify_coverage, CoverageResult
+from .roots import _LANG_EXTENSIONS
 from .schema_validator import validate_task, ValidationResult
 from .session import (
     blind_session,
     get_audit_log,
     audit_violations,
     settings_template_for,
+)
+
+
+# Extensions treated as "a test file worth sealing" everywhere in this
+# module — _hash_test_files (the red/green integrity seal) and
+# _contract_files_for (task-id-named contract file lookup) alike. Built from
+# every language roots.py's blocked-root scanner knows about (so onboarding
+# a language there, e.g. TD's gdscript fix, onboards it here too instead of
+# needing a second, easily-forgotten edit), plus the JS family — roots.py
+# folds JS into a directory convention rather than a scanned extension list,
+# so .js/.ts/.tsx/.jsx/.mjs/.cjs are added explicitly — and .kt, which has
+# no roots.py entry yet.
+_JS_FAMILY_TEST_EXTENSIONS = (".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs")
+SEALABLE_TEST_EXTENSIONS = frozenset(
+    {ext for exts in _LANG_EXTENSIONS.values() for ext in exts}
+    | set(_JS_FAMILY_TEST_EXTENSIONS)
+    | {".kt"}
 )
 
 
@@ -98,7 +116,7 @@ def _hash_test_files(test_dirs: list[Path]) -> dict[str, str]:
                 # A .pyc/__pycache__/node_modules/NUL artifact appearing in a
                 # locked test dir must not change the sealed hash set.
                 continue
-            if path.suffix.lower() not in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs"):
+            if path.suffix.lower() not in SEALABLE_TEST_EXTENSIONS:
                 continue
             hashes[str(path)] = _hash_file(path)
     return hashes
@@ -356,9 +374,6 @@ def _expected_manual_output(role: str, task_id: str, inputs: dict) -> Path | Non
 
 _AUDIT_DIR = Path(".themis") / "blind_audit"
 
-# Suffixes `_hash_test_files` seals, plus the two coverage.py can tag.
-_TEST_SUFFIXES = (".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".rs", ".gd")
-
 
 def _task_id_pattern(task_id: str) -> re.Pattern[str]:
     """Match `task_id` as a whole token, so TD1 does not match TD110.
@@ -424,7 +439,7 @@ def _contract_files_for(task_id: str, test_dirs: list) -> list[str]:
         for path in sorted(root.rglob("*")):
             if not path.is_file() or is_artifact_path(path):
                 continue
-            if path.suffix.lower() not in _TEST_SUFFIXES:
+            if path.suffix.lower() not in SEALABLE_TEST_EXTENSIONS:
                 continue
             if pattern.search(path.name.lower()):
                 found.append(str(path))
