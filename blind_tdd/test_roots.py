@@ -142,6 +142,47 @@ def test_python_project_scan_excludes_blind_tdd_test_dirs(tmp_path):
     assert "tests/**" not in sealed.blocked_paths
 
 
+# ---------------------------------------------------------------------------
+# GDScript (scanned) — Soapbox-2D's RootInferenceError
+# ---------------------------------------------------------------------------
+
+def _make_gdscript_project(root: Path) -> None:
+    """Lay out a project shaped like Soapbox-2D: a Godot project with real
+    implementation under scripts/ and scenes/, a stack-declared test dir
+    (test/), and a separate blind-TDD test dir (tests/contracts/)."""
+    (root / "scripts").mkdir()
+    (root / "scripts" / "foo.gd").write_text("extends Node\n", encoding="utf-8")
+    (root / "scenes").mkdir()
+    (root / "scenes" / "bar.gd").write_text("extends Node2D\n", encoding="utf-8")
+    (root / "test").mkdir()
+    (root / "test" / "test_x.gd").write_text("extends GutTest\n", encoding="utf-8")
+    (root / "tests" / "contracts").mkdir(parents=True)
+    (root / "tests" / "contracts" / "test_c.gd").write_text("extends GutTest\n", encoding="utf-8")
+
+
+def _gdscript_config() -> dict:
+    return {
+        "stack": {
+            "languages": ["gdscript"],
+            "test_runner": {
+                "gdscript": {"command": "bash scripts/tools/run_tests.sh", "test_dir": "test/"},
+            },
+        },
+        "gate": {"blind_tdd": {"test_dirs": ["tests/contracts/"]}},
+    }
+
+
+def test_gdscript_project_seals_scripts_and_scenes_not_test_dirs(tmp_path):
+    _make_gdscript_project(tmp_path)
+    sealed = derive_blocked_paths(_gdscript_config(), tmp_path)
+
+    assert "scripts/**" in sealed.blocked_paths
+    assert "scenes/**" in sealed.blocked_paths
+    assert "test/**" not in sealed.blocked_paths
+    assert "tests/**" not in sealed.blocked_paths
+    assert sealed.method == "language-scan"
+
+
 def test_mixed_languages_union_js_convention_and_scan(tmp_path):
     _make_python_project(tmp_path)
     (tmp_path / "src").mkdir()

@@ -68,6 +68,7 @@ _LANG_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "c#": (".cs",),
     "java": (".java",),
     "ruby": (".rb",),
+    "gdscript": (".gd",),
 }
 
 # Top-level directory names no ecosystem treats as source, regardless of
