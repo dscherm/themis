@@ -214,9 +214,15 @@ def test_default_allowed_paths_per_role():
     assert ".themis/blind_tdd/challenges/**" in arbiter
     assert unknown == []
 
-    # Runner is a superset of writer
+    # Runner is a superset of writer, except the writer's own pending brief
     for p in writer:
+        if p.startswith(".themis/blind_tdd/pending/"):
+            assert p not in runner
+            continue
         assert p in runner
+    assert ".themis/blind_tdd/pending/test_writer-*.md" in writer
+    assert ".themis/blind_tdd/pending/test_runner-*.md" in runner
+    assert ".themis/blind_tdd/pending/arbiter-*.md" in arbiter
 
 
 def test_default_blocked_paths_includes_src_and_git():

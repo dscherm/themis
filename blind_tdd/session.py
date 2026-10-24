@@ -50,6 +50,9 @@ _DEFAULT_BLOCKED = [
 ]
 
 
+_PENDING_PREFIX = ".themis/blind_tdd/pending/"
+
+
 # Default allowed paths for Agent #1 (test writer).
 _DEFAULT_WRITER_ALLOWED = [
     "tests/**",
@@ -61,13 +64,19 @@ _DEFAULT_WRITER_ALLOWED = [
     "README.md",
     ".themis/blind_tdd/active_session.json",  # agent needs to know it's blind
     ".themis/blind_tdd/triage/**",  # the writer's MANDATED output — its triage report
+    # Its OWN manual-spawner brief (ManualSpawner writes pending/<role>-<task>.md).
+    # Scoped to the role prefix: another role's brief stays denied.
+    ".themis/blind_tdd/pending/test_writer-*.md",
 ]
 
 
 # Default allowed paths for Agent #2 (test runner). Same as writer but
 # also allows reading test config files needed to execute tests, and writing
 # its own mandated output (the green report).
-_DEFAULT_RUNNER_ALLOWED = _DEFAULT_WRITER_ALLOWED + [
+_DEFAULT_RUNNER_ALLOWED = [
+    p for p in _DEFAULT_WRITER_ALLOWED if not p.startswith(_PENDING_PREFIX)
+] + [
+    ".themis/blind_tdd/pending/test_runner-*.md",  # its own brief only
     ".themis/blind_tdd/green_report/**",  # the runner's MANDATED output
     "pyproject.toml",
     "pytest.ini",
@@ -83,7 +92,10 @@ _DEFAULT_RUNNER_ALLOWED = _DEFAULT_WRITER_ALLOWED + [
 
 # Default allowed paths for Agent #3 (arbiter). Same as writer plus the
 # specific challenge document location.
-_DEFAULT_ARBITER_ALLOWED = _DEFAULT_WRITER_ALLOWED + [
+_DEFAULT_ARBITER_ALLOWED = [
+    p for p in _DEFAULT_WRITER_ALLOWED if not p.startswith(_PENDING_PREFIX)
+] + [
+    ".themis/blind_tdd/pending/arbiter-*.md",  # its own brief only
     ".themis/blind_tdd/challenges/**",
     ".themis/blind_tdd/rulings/**",
 ]
