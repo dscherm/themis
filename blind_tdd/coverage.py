@@ -213,11 +213,119 @@ def _extract_from_csharp_file(path: Path) -> list[TestAnnotation]:
     return results
 
 
+def _extract_from_gdscript_file(path: Path) -> list[TestAnnotation]:
+    """Parse a GDScript test file (GUT or a TestBase-style harness).
+
+    Test methods are `func test_*()` / `func _test_*()`. GDScript has no
+    docstrings, so the `Covers: AC-N` tag lives in a `#`/`##` comment either
+    just above the method or on the method's first body line. Attribute each
+    Covers comment to the enclosing test method; a Covers seen before any test
+    method is held and attached to the next one (comment-above style).
+    """
+    results: list[TestAnnotation] = []
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return results
+
+    func_re = re.compile(r"^\s*func\s+(?P<name>_?test\w*)\s*\(", re.IGNORECASE)
+    anns: dict[str, TestAnnotation] = {}
+    current: str | None = None
+    pending: list[str] = []
+
+    def _ensure(name: str) -> TestAnnotation:
+        if name not in anns:
+            ann = TestAnnotation(test_name=name, test_file=str(path), covers=[])
+            anns[name] = ann
+            results.append(ann)
+        return anns[name]
+
+    for line in source.splitlines():
+        m = func_re.match(line)
+        if m:
+            current = m.group("name") or ""
+            ann = _ensure(current)
+            for ac in pending:
+                if ac not in ann.covers:
+                    ann.covers.append(ac)
+            pending = []
+            continue
+        covers = _parse_covers_from_docstring(line)
+        if not covers:
+            continue
+        if current is not None:
+            ann = anns[current]
+            for ac in covers:
+                if ac not in ann.covers:
+                    ann.covers.append(ac)
+        else:
+            pending.extend(covers)
+    return results
+
+
+def _extract_from_rust_file(path: Path) -> list[TestAnnotation]:
+    """Parse a Rust test file. Test fns carry a `#[test]` attribute (also
+    `#[tokio::test]`, `#[rstest]`, ...); the `Covers: AC-N` tag lives in a
+    `//`/`///` comment above the attribute or on the fn's first body line.
+    Attribute each Covers to the nearest `#[test] fn`.
+    """
+    results: list[TestAnnotation] = []
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return results
+
+    attr_re = re.compile(r"^\s*#\[\s*[\w:]*test\b")
+    fn_re = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(?P<name>\w+)\s*\(")
+    anns: dict[str, TestAnnotation] = {}
+    current: str | None = None
+    pending: list[str] = []
+    saw_test_attr = False
+
+    def _ensure(name: str) -> TestAnnotation:
+        if name not in anns:
+            ann = TestAnnotation(test_name=name, test_file=str(path), covers=[])
+            anns[name] = ann
+            results.append(ann)
+        return anns[name]
+
+    for line in source.splitlines():
+        if attr_re.match(line):
+            saw_test_attr = True
+            current = None  # the covers seen next belong to the upcoming test fn
+            continue
+        fm = fn_re.match(line)
+        if fm:
+            if saw_test_attr:
+                name = fm.group("name") or ""
+                current = name
+                ann = _ensure(name)
+                for ac in pending:
+                    if ac not in ann.covers:
+                        ann.covers.append(ac)
+                pending = []
+            else:
+                current = None  # a non-test fn; body covers no longer attach
+            saw_test_attr = False
+            continue
+        covers = _parse_covers_from_docstring(line)
+        if not covers:
+            continue
+        if current is not None:
+            ann = anns[current]
+            for ac in covers:
+                if ac not in ann.covers:
+                    ann.covers.append(ac)
+        else:
+            pending.extend(covers)
+    return results
+
+
 def extract_covers(test_dir: Path | str) -> list[TestAnnotation]:
     """Walk a test directory and extract all test annotations.
 
     Supports Python (.py), JavaScript/TypeScript (.js/.ts/.tsx/.jsx),
-    and C# (.cs).
+    C# (.cs), GDScript (.gd), and Rust (.rs).
     """
     test_dir = Path(test_dir)
     if not test_dir.exists():
@@ -238,6 +346,10 @@ def extract_covers(test_dir: Path | str) -> list[TestAnnotation]:
             results.extend(_extract_from_js_file(path))
         elif suffix == ".cs":
             results.extend(_extract_from_csharp_file(path))
+        elif suffix == ".gd":
+            results.extend(_extract_from_gdscript_file(path))
+        elif suffix == ".rs":
+            results.extend(_extract_from_rust_file(path))
     return results
 
 

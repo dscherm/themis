@@ -85,7 +85,15 @@ gate-runner process that reads it:
   against editing the *test*; it assumes the *record of the seal* is not itself
   attacker-controlled.
 - The green report (`.themis/blind_tdd/green_report/<task_id>.json`) is likewise a
-  filesystem artifact the runner trusts.
+  filesystem artifact the runner trusts. `record_runner_handshake` narrows this
+  without closing it: the supported path takes no result parameter and builds
+  the report from pytest's own JUnit XML, and the green phase rejects a report
+  whose claimed `overall: pass` contradicts the `measured` block it carries
+  (non-zero exit code, a test recorded as failing). What remains unchecked is a
+  report written by hand with no evidence block at all — that is still an
+  assertion, and verifying it would mean the gate re-running the suite itself,
+  which it does not do. A blind runner agent's report is exactly this shape by
+  design.
 
 **Mitigation (optional, opt-in): sign the seal record.** Set `THEMIS_SEAL_KEY` in
 the gate/host environment. The red phase then HMAC-SHA256s the baseline into the
@@ -152,6 +160,16 @@ persuasive-but-wrong argument can get a *correct* test deleted (an erroneous
 per-task and per-criterion challenge caps, and an `ambiguous` ruling that escalates
 to a human instead of auto-deleting. It is a smaller surface than letting the
 implementer edit tests directly, but it is not zero.
+
+An upheld ruling also licenses exactly one rewrite: the gate re-hashes the file
+the ruling names and accepts whatever the writer put there, citing the ruling
+id ([`docs/post-ruling-reseal.md`](post-ruling-reseal.md)). It does not check
+that the rewrite matches the arbiter's `resolution` — the record keeps both
+hashes so a human can diff it, but nothing mechanical reads the resolution.
+Every other sealed file stays locked, a rewrite at a different path is flagged
+like any other change, and with `THEMIS_SEAL_KEY` set the pending/applied
+records ride under the same HMAC as the baseline, so a key-less implementer
+cannot forge an "upheld" entry to license its own edit.
 
 ## Results are per-model snapshots
 

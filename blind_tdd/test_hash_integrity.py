@@ -340,6 +340,36 @@ def test_hash_test_files_ignores_non_test_extensions():
             assert any("a.py" in k for k in h.keys())
 
 
+def test_hash_test_files_seals_gdscript_but_not_json_fixtures():
+    """sb2d-lha: a Godot project's blind contract tests are .gd files, not
+    .py — `record-writer-handshake ... --test-dir tests/contracts` on such a
+    project must seal them instead of reporting "no test files found"."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            Path("tests/contracts").mkdir(parents=True)
+            Path("tests/contracts/test_sb2d_awa_kart_physics_blind.gd").write_text(
+                "extends GutTest\nfunc test_x():\n\tassert_true(true)\n",
+                encoding="utf-8",
+            )
+            Path("tests/contracts/fixture.json").write_text("{}", encoding="utf-8")
+            h = _hash_test_files([Path("tests/contracts")])
+            assert len(h) == 1
+            assert any(k.endswith(".gd") for k in h.keys())
+            assert not any(k.endswith(".json") for k in h.keys())
+
+
+def test_hash_test_files_still_seals_python_regression():
+    """Regression guard: unifying the extension set behind
+    SEALABLE_TEST_EXTENSIONS must not stop sealing plain .py test files."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            Path("tests").mkdir()
+            Path("tests/test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
+            h = _hash_test_files([Path("tests")])
+            assert len(h) == 1
+            assert any(k.endswith("test_a.py") for k in h.keys())
+
+
 def test_hash_test_files_handles_missing_directory():
     with tempfile.TemporaryDirectory() as td:
         with _chdir(Path(td)):
@@ -360,6 +390,324 @@ def test_hash_uses_sha256():
                 expected = hashlib.sha256(b"x").hexdigest()
                 assert digest == expected
 
+
+# ---------------------------------------------------------------------------
+# Post-ruling re-seal — the BL-2 / BM-1 scenario through the gate
+#
+# red → implement → challenge upheld (file deleted) → writer rewrites the
+# file → green. Before 2026-10-24 the last step reported "test file
+# integrity compromised" for a rewrite the engine itself ordered. These run
+# the real orchestrator (fake spawners) through gate_integration end-to-end.
+# ---------------------------------------------------------------------------
+
+from blind_tdd import challenge as ch  # noqa: E402
+from blind_tdd import gate_integration as gi  # noqa: E402
+
+GATE_TASK = {**VALID_TASK, "title": "hash task", "passes": False}
+
+AC1_ORIGINAL = 'def test_ac1():\n    """Covers: AC-1"""\n    assert 1 == 1\n'
+AC1_REWRITTEN = (
+    'def test_ac1():\n    """Covers: AC-1"""\n'
+    '    # rewritten under the arbiter\'s ruling: compare against the bead id\n'
+    '    assert "bid" == "bid"\n'
+)
+
+
+def _write_plan(dir_: Path, tasks: list[dict]) -> None:
+    (dir_ / "plan.md").write_text(
+        "# Plan\n\n```json\n" + json.dumps({"tasks": tasks}, indent=2) + "\n```\n",
+        encoding="utf-8",
+    )
+
+
+def _gate_config(enforcement: str = "strict", spawner: str = "manual") -> dict:
+    return {"gate": {"blind_tdd": {
+        "enabled": True,
+        "enforcement": enforcement,
+        "spawner": spawner,
+        "preflight": "warn",
+        "test_dirs": ["tests/contracts/"],
+    }}}
+
+
+def _run_gate(config: dict, task_id: str = "task-hash"):
+    os.environ["RALPH_BLIND_TDD_TASK"] = task_id
+    try:
+        return gi.run_blind_tdd_gate(config)
+    finally:
+        os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+
+
+class _ReturningFactory:
+    """Stand-in for gi._make_orchestrator that hands back one real orchestrator."""
+
+    def __init__(self, orch):
+        self.orch = orch
+
+    def __call__(self, config, btd_cfg):
+        return self.orch
+
+
+def _scenario(tmp: Path, *, orch=None):
+    """Set up a project with a real red phase sealed, return (project, orch)."""
+    ralph = tmp / "ralph_home"
+    _write_prompts(ralph)
+    project = tmp / "project"
+    project.mkdir()
+    _write_plan(project, [GATE_TASK])
+    return project, (orch or _make_orch(ralph))
+
+
+def _challenge_ac1_upheld() -> "ch.Challenge":
+    chal = ch.file_challenge(
+        task_id="task-hash", test_file="tests/contracts/test_ac1.py",
+        test_name="test_ac1", criterion="AC-1",
+        argument="the assertion contradicts the fixture it depends on",
+    )
+    ruling = ch.Ruling(
+        challenge_id=chal.challenge_id, task_id="task-hash", ruling="upheld",
+        reasoning="the fixture itself puts the string in plan.md", criterion_affected="AC-1",
+        resolution="rewrite test_ac1 narrowly; keep every other assertion",
+    )
+    # The ruling document the arbiter would have left on disk.
+    rulings = Path(".themis/blind_tdd/rulings")
+    rulings.mkdir(parents=True, exist_ok=True)
+    (rulings / f"{chal.challenge_id}.json").write_text(
+        json.dumps(ruling.to_dict()), encoding="utf-8",
+    )
+    res = ch.apply_ruling(challenge=chal, ruling=ruling)
+    assert res.action == "test_deleted" and res.reseal_recorded, res.reseal_note
+    return chal
+
+
+def test_upheld_ruling_rewrite_is_resealed_and_cited():
+    """Done-criterion 1: red, implement, challenge upheld, rewrite → integrity
+    OK and the gate result cites the ruling."""
+    with tempfile.TemporaryDirectory() as td:
+        project, orch = _scenario(Path(td))
+        original = gi._make_orchestrator
+        gi._make_orchestrator = _ReturningFactory(orch)
+        try:
+            with _chdir(project):
+                cfg = _gate_config("strict")
+                r1 = _run_gate(cfg)
+                assert r1.passed and r1.phase == "red", r1.message
+                # Bytes on disk, not the string: write_text translates newlines.
+                sealed_ac1 = hashlib.sha256(Path("tests/contracts/test_ac1.py").read_bytes()).hexdigest()
+                assert sealed_ac1 in gi.load_red_state("task-hash")["test_file_hashes"].values()
+
+                # "implement"
+                Path("src").mkdir()
+                Path("src/foo.py").write_text("def foo():\n    return True\n", encoding="utf-8")
+
+                chal = _challenge_ac1_upheld()
+                assert not Path("tests/contracts/test_ac1.py").exists()
+
+                # Gate before the rewrite exists: not green, not tampering.
+                r2 = _run_gate(cfg)
+                assert r2.reason == "ruling_rewrite_pending", r2.message
+                assert not r2.passed  # strict blocks until the rewrite lands
+                assert chal.challenge_id in r2.message
+                assert "not yet rewritten" in r2.message
+                assert not Path(".themis/blind_tdd/tamper_ledger.jsonl").exists()
+
+                # The writer rewrites the file per the ruling.
+                Path("tests/contracts/test_ac1.py").write_text(AC1_REWRITTEN, encoding="utf-8")
+
+                r3 = _run_gate(cfg)
+                assert r3.passed and r3.phase == "green", r3.message
+                assert chal.challenge_id in r3.message
+                applied = r3.details["rulings_applied"]
+                assert len(applied) == 1
+                assert applied[0]["challenge_id"] == chal.challenge_id
+                assert applied[0]["test_file"] == "tests/contracts/test_ac1.py"
+                assert applied[0]["criterion_affected"] == "AC-1"
+                assert applied[0]["sealed_hash"] == sealed_ac1
+                assert applied[0]["resealed_hash"] == hashlib.sha256(
+                    Path("tests/contracts/test_ac1.py").read_bytes()).hexdigest()
+                assert not Path(".themis/blind_tdd/tamper_ledger.jsonl").exists()
+                # Green pass clears the seal as always.
+                assert gi.load_red_state("task-hash") is None
+        finally:
+            gi._make_orchestrator = original
+
+
+def test_unrelated_edit_still_breaks_integrity_after_a_reseal():
+    """Done-criterion 2: the ruling licenses ONE file. Any other sealed file
+    that changed is still reported compromised, and the tamper ledger records it."""
+    with tempfile.TemporaryDirectory() as td:
+        project, orch = _scenario(Path(td))
+        original = gi._make_orchestrator
+        gi._make_orchestrator = _ReturningFactory(orch)
+        try:
+            with _chdir(project):
+                cfg = _gate_config("strict")
+                assert _run_gate(cfg).phase == "red"
+                chal = _challenge_ac1_upheld()
+                Path("tests/contracts/test_ac1.py").write_text(AC1_REWRITTEN, encoding="utf-8")
+                # Unrelated tampering, no ruling behind it.
+                Path("tests/contracts/test_ac2.py").write_text(
+                    'def test_ac2():\n    """Covers: AC-2"""\n    assert True  # weakened\n',
+                    encoding="utf-8",
+                )
+
+                r = _run_gate(cfg)
+                assert not r.passed and r.reason == "green_failed", r.message
+                assert r.details["hash_break"] is True
+                assert "integrity compromised" in r.message
+                assert "test_ac2.py" in r.message
+                assert "test_ac1.py" not in r.message
+                # The accepted rewrite is still cited, so a reader can tell the
+                # two apart.
+                assert chal.challenge_id in r.message
+                assert r.details["rulings_applied"][0]["challenge_id"] == chal.challenge_id
+                assert Path(".themis/blind_tdd/tamper_ledger.jsonl").exists()
+                # Red state survives a failed green, with the re-seal in it.
+                state = gi.load_red_state("task-hash")
+                assert state["rulings_applied"][0]["challenge_id"] == chal.challenge_id
+                assert "pending_rulings" not in state
+        finally:
+            gi._make_orchestrator = original
+
+
+def test_restoring_the_deleted_test_unchanged_is_not_a_rewrite():
+    """`git checkout` of the deleted file is not the ordered rewrite: byte-identical
+    to the sealed version → still pending, with a message that says so."""
+    with tempfile.TemporaryDirectory() as td:
+        project, orch = _scenario(Path(td))
+        original = gi._make_orchestrator
+        gi._make_orchestrator = _ReturningFactory(orch)
+        try:
+            with _chdir(project):
+                cfg = _gate_config("strict")
+                assert _run_gate(cfg).phase == "red"
+                chal = _challenge_ac1_upheld()
+                Path("tests/contracts/test_ac1.py").write_text(AC1_ORIGINAL, encoding="utf-8")
+
+                r = _run_gate(cfg)
+                assert r.reason == "ruling_rewrite_pending", r.message
+                assert "byte-identical" in r.message
+                assert r.details["pending_rulings"][0]["status"] == "unchanged"
+                assert r.details["pending_rulings"][0]["challenge_id"] == chal.challenge_id
+                assert gi.load_red_state("task-hash")["pending_rulings"]
+        finally:
+            gi._make_orchestrator = original
+
+
+def test_warn_mode_pending_rewrite_passes_but_still_names_the_ruling():
+    with tempfile.TemporaryDirectory() as td:
+        project, orch = _scenario(Path(td))
+        original = gi._make_orchestrator
+        gi._make_orchestrator = _ReturningFactory(orch)
+        try:
+            with _chdir(project):
+                cfg = _gate_config("warn")
+                assert _run_gate(cfg).phase == "red"
+                chal = _challenge_ac1_upheld()
+                r = _run_gate(cfg)
+                assert r.passed  # warn never blocks
+                assert r.reason == "ruling_rewrite_pending"
+                assert chal.challenge_id in r.message
+        finally:
+            gi._make_orchestrator = original
+
+
+class _ResumingOrchestrator:
+    """Wraps the real orchestrator; stands in for a claude_code spawner whose
+    resumed blind writer rewrites the ordered file."""
+
+    def __init__(self, inner, content: str):
+        self._inner = inner
+        self._content = content
+        self.resume_calls: list[dict] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def resume_red_phase_after_ruling(self, task, previous_red, ruling):
+        self.resume_calls.append(ruling)
+        Path("tests/contracts/test_ac1.py").write_text(self._content, encoding="utf-8")
+        merged = dict(previous_red.triage_report)
+        merged["resumed_for"] = ruling.get("criterion_affected")
+        return RedPhaseResult(
+            passed=True, reason="red phase resumed after upheld ruling",
+            test_file_hashes=_hash_test_files([Path("tests/contracts/")]),
+            triage_report=merged,
+        )
+
+
+def test_claude_code_spawner_resumes_the_writer_for_a_missing_rewrite():
+    """With an automated spawner the gate does not wait for a human: it resumes
+    the red phase under the ruling, then re-seals only the ordered file."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        ralph = tmp / "ralph_home"
+        _write_prompts(ralph)
+        project = tmp / "project"
+        project.mkdir()
+        _write_plan(project, [GATE_TASK])
+        orch = _ResumingOrchestrator(_make_orch(ralph), AC1_REWRITTEN)
+        original = gi._make_orchestrator
+        gi._make_orchestrator = _ReturningFactory(orch)
+        try:
+            with _chdir(project):
+                cfg = _gate_config("strict", spawner="claude_code")
+                assert _run_gate(cfg).phase == "red"
+                chal = _challenge_ac1_upheld()
+                # An unrelated file also drifts — the resume's full-tree hashes
+                # must NOT launder it.
+                Path("tests/contracts/test_ac2.py").write_text(
+                    'def test_ac2():\n    """Covers: AC-2"""\n    assert True  # drift\n',
+                    encoding="utf-8",
+                )
+
+                r = _run_gate(cfg)
+                assert len(orch.resume_calls) == 1
+                assert orch.resume_calls[0]["challenge_id"] == chal.challenge_id
+                assert not r.passed and r.reason == "green_failed", r.message
+                assert "test_ac2.py" in r.message and "test_ac1.py" not in r.message
+                state = gi.load_red_state("task-hash")
+                assert state["rulings_applied"][0]["challenge_id"] == chal.challenge_id
+                assert state["triage_report"]["resumed_for"] == "AC-1"
+
+                # Put the unrelated file back; now the task goes green.
+                Path("tests/contracts/test_ac2.py").write_text(
+                    'def test_ac2():\n    """Covers: AC-2"""\n    assert 1 == 1\n',
+                    encoding="utf-8",
+                )
+                r2 = _run_gate(cfg)
+                assert r2.passed and r2.phase == "green", r2.message
+                assert chal.challenge_id in r2.message
+        finally:
+            gi._make_orchestrator = original
+
+
+def test_reseal_refuses_to_unsign_a_signed_record():
+    """Direct check of the fail-closed branch: a signed record whose key is gone
+    cannot be re-sealed; the rewrite stays reported, nothing is written."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            os.environ[gi.SEAL_KEY_ENV] = "unit-test-key"
+            try:
+                Path("tests/contracts").mkdir(parents=True)
+                Path("tests/contracts/test_ac1.py").write_text(AC1_ORIGINAL, encoding="utf-8")
+                gi.save_red_state("task-hash", RedPhaseResult(
+                    passed=True, test_file_hashes=_hash_test_files([Path("tests/contracts/")]),
+                    triage_report={},
+                ))
+                ok, note = gi.record_pending_ruling(
+                    "task-hash", challenge_id="chal-x", test_file="tests/contracts/test_ac1.py",
+                    criterion_affected="AC-1",
+                )
+                assert ok, note
+            finally:
+                os.environ.pop(gi.SEAL_KEY_ENV, None)
+            Path("tests/contracts/test_ac1.py").write_text(AC1_REWRITTEN, encoding="utf-8")
+            before = gi.load_red_state("task-hash")
+            state, applied, pending = gi.reseal_after_rulings("task-hash", before)
+            assert applied == []
+            assert pending[0]["status"] == "unsigned_record_refused"
+            assert gi.load_red_state("task-hash") == before
 
 # ---------------------------------------------------------------------------
 # Runner

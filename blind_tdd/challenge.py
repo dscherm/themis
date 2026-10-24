@@ -35,6 +35,20 @@ event: `challenge_filed`, `challenge_cap_exceeded`, `arbiter_ruling`,
 `challenge_resolved`. These feed the dashboard tiles planned in
 Phase C2.
 
+## Upheld rulings and the red seal (2026-10-24)
+
+An upheld ruling deletes a file the red phase hash-locked. Twice in
+ralph-universal (BL-2, BM-1) the writer then recreated the file with only
+the prescribed change and the next green run reported "test file integrity
+compromised" — for a rewrite this module had ordered. So `apply_ruling` now
+also records the ruling in the task's red state
+(`gate_integration.record_pending_ruling`); the next gate run re-hashes that
+one file, moves the ruling to `rulings_applied`, and cites it. The record is
+HMAC-covered when a seal key is configured, so a key-less process (an
+implementer with Bash) cannot append a forged "upheld" entry; in that case
+`apply_ruling` reports the refusal in `ChallengeResult.reseal_note` and the
+green check keeps flagging the file, as before.
+
 ## This module does NOT
 
 - spawn Agent #1 for test rewrites (that's the orchestrator's red
@@ -45,6 +59,32 @@ Phase C2.
 
 See `docs/reference/blind-tdd-gate-rfc.md` sections R7 and R8 for the full
 design rationale.
+
+## TD26 (2026-09-18) — is the arbiter blind, and to what?
+
+`spawn_arbiter` used to build `spawn_inputs` and call `spawner.spawn(...)`
+with no `blind_session` open at all — no `PreToolUse` enforcement, no
+`active_session.json`, nothing. Meanwhile `templates/blind_tdd/prompts/
+arbiter.md` (the arbiter's own briefing) tells the arbiter, in writing:
+"You cannot read the implementation. The PreToolUse hook will reject any
+Read, Grep, or Glob call against src/, examples/, data/generated/, or
+.git/" and lists "ruling based on implementation details you cannot see"
+under "What makes a BAD ruling". That is not a hedge — it is the arbiter's
+entire epistemic contract: it is supposed to judge the disputed test
+against the acceptance criterion's text alone, the same independence-by-
+construction TD21 restored for the writer/runner phases. An arbiter that
+could see the implementation would not be adjudicating a dispute between
+"what the spec says" and "what the writer wrote" — it would just read the
+code and settle it, which collapses the entire point of blind TDD (a
+test whose correctness was decided by someone who never saw what it needs
+to pass). So: **the arbiter SHOULD be blind**, on the strength of its own
+briefing document, and `spawn_arbiter` below now opens a `blind_session`
+for the "arbiter" role before spawning, sealed with the SAME
+`derive_blocked_paths` roots the writer/runner use (TD21) — a project
+whose config can't produce real roots must not get an arbiter that reads
+`arbiter.md`'s promise as fiction. `sealed_roots` is a required argument
+(no silent unsealed fallback) precisely because this bug was "no session
+at all", not "the wrong session".
 """
 
 from __future__ import annotations
@@ -56,6 +96,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+
+from .session import blind_session
 
 
 # Default caps — overridden by config
@@ -127,6 +169,12 @@ class Ruling:
     resolution: str = ""
     arbiter_id: str = ""
     ruled_at: str = ""
+    # Which roots the arbiter's blind_session actually sealed for this
+    # ruling, and how they were derived (blind_tdd.roots) — TD26's
+    # auditability counterpart to RedPhaseResult.sealed_roots (TD21).
+    # Attached by spawn_arbiter, which is the code that knows the seal;
+    # never echoed by the arbiter agent itself.
+    sealed_roots: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -138,6 +186,7 @@ class Ruling:
             "resolution": self.resolution,
             "arbiter_id": self.arbiter_id,
             "ruled_at": self.ruled_at,
+            "sealed_roots": dict(self.sealed_roots),
         }
 
 
@@ -153,6 +202,16 @@ class ChallengeResult:
     affected_criterion: str = ""
     affected_test_file: str = ""
     cap_reason: str = ""
+    # Same auditability record as Ruling.sealed_roots, carried up so a
+    # caller inspecting only the ChallengeResult (not the inner Ruling)
+    # can still tell whether this challenge was arbitrated under a seal.
+    # Empty for cap_exceeded/arbiter_failed outcomes — no arbiter ran.
+    sealed_roots: dict = field(default_factory=dict)
+    # Upheld only: whether the task's red state now records this ruling as a
+    # pending rewrite (so the next gate run re-seals the file), and why not
+    # when it does not. Empty for every other outcome.
+    reseal_recorded: bool = False
+    reseal_note: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -165,6 +224,9 @@ class ChallengeResult:
             "affected_criterion": self.affected_criterion,
             "affected_test_file": self.affected_test_file,
             "cap_reason": self.cap_reason,
+            "sealed_roots": dict(self.sealed_roots),
+            "reseal_recorded": self.reseal_recorded,
+            "reseal_note": self.reseal_note,
         }
 
 
@@ -314,12 +376,35 @@ def spawn_arbiter(
     spawner: ArbiterSpawner,
     arbiter_prompt: str,
     task_spec: dict,
+    sealed_roots: dict,
 ) -> Ruling | None:
-    """Spawn Agent #3 and wait for the ruling file.
+    """Spawn Agent #3 under a blind session and wait for the ruling file.
 
-    Returns the parsed Ruling, or None if the spawn failed or the
-    arbiter did not produce a valid ruling document.
+    Returns the parsed Ruling, or None if the session could not be
+    activated, the spawn failed, or the arbiter did not produce a valid
+    ruling document.
+
+    `sealed_roots` is the record from
+    `blind_tdd.roots.derive_blocked_paths(project_config).to_record()` —
+    the same one `BlindTddOrchestrator` carries as `sealed_roots_meta` for
+    the writer/runner phases (TD21). It is REQUIRED, with no
+    empty-dict/unsealed fallback: see the TD26 module note above for why
+    an arbiter run with no session at all is exactly the bug this closes.
+    A caller with no derivable roots must let `RootInferenceError` from
+    `derive_blocked_paths` surface as a gate failure BEFORE calling this,
+    never pass `{}` here to get an unsealed arbiter.
     """
+    blocked_paths = sealed_roots.get("blocked_paths") or []
+    if not blocked_paths:
+        raise ValueError(
+            "spawn_arbiter requires a non-empty sealed_roots['blocked_paths'] "
+            "(see blind_tdd.roots.derive_blocked_paths) — TD26 closed the gap "
+            "where the arbiter's own briefing (arbiter.md) claimed blindness "
+            "that no session enforced. Derive real roots first, or let "
+            "RootInferenceError propagate as a gate failure; do not pass an "
+            "empty dict to run the arbiter unsealed."
+        )
+
     spawn_inputs = {
         "task_id": challenge.task_id,
         "challenge_id": challenge.challenge_id,
@@ -327,13 +412,26 @@ def spawn_arbiter(
         "challenge": challenge.to_dict(),
         "test_file": challenge.test_file,
     }
+
     try:
-        result = spawner.spawn(
-            role="arbiter",
-            prompt_template=arbiter_prompt,
-            inputs=spawn_inputs,
-        )
-    except Exception as e:  # defensive: spawner errors must not propagate
+        with blind_session(
+            agent_role="arbiter",
+            task_id=challenge.task_id,
+            blocked_paths=blocked_paths,
+        ) as session:
+            spawn_inputs["session_id"] = session["session_id"]
+            try:
+                result = spawner.spawn(
+                    role="arbiter",
+                    prompt_template=arbiter_prompt,
+                    inputs=spawn_inputs,
+                )
+            except Exception:  # defensive: spawner errors must not propagate
+                return None
+    except RuntimeError:
+        # Another blind session (writer/runner phase) is already active.
+        # The arbiter must not run unsealed to work around that — fail the
+        # spawn instead, same as any other blind-session activation failure.
         return None
 
     if not result.get("success"):
@@ -361,6 +459,7 @@ def spawn_arbiter(
         resolution=str(raw.get("resolution", "")),
         arbiter_id=str(raw.get("arbiter_id", "")),
         ruled_at=str(raw.get("ruled_at", _now_iso())),
+        sealed_roots=dict(sealed_roots),
     )
 
 
@@ -403,17 +502,32 @@ def apply_ruling(
                 affected_criterion=ruling.criterion_affected,
                 affected_test_file=str(test_path),
             )
+        # Deferred import: gate_integration imports orchestrator at module
+        # load and this module is imported by callers that never touch the
+        # gate; importing it at module scope here would be circular.
+        from .gate_integration import record_pending_ruling
+
+        recorded, note = record_pending_ruling(
+            challenge.task_id,
+            challenge_id=challenge.challenge_id,
+            test_file=challenge.test_file,
+            criterion_affected=ruling.criterion_affected,
+            resolution=ruling.resolution,
+        )
         return ChallengeResult(
             success=True,
             action="test_deleted" if deleted else "test_already_missing",
             challenge_id=challenge.challenge_id,
             message=(
                 f"challenge upheld: {test_path} removed. Rewrite tests for "
-                f"{ruling.criterion_affected} with the arbiter's reasoning as context."
+                f"{ruling.criterion_affected} with the arbiter's reasoning as context. "
+                f"Red seal: {note}."
             ),
             ruling=ruling,
             affected_criterion=ruling.criterion_affected,
             affected_test_file=str(test_path),
+            reseal_recorded=recorded,
+            reseal_note=note,
         )
 
     if verdict == "rejected":
@@ -529,6 +643,7 @@ def process_challenge(
     task_spec: dict,
     spawner: ArbiterSpawner,
     arbiter_prompt: str,
+    sealed_roots: dict,
     max_per_task: int = DEFAULT_MAX_PER_TASK,
     max_per_criterion: int = DEFAULT_MAX_PER_CRITERION,
     human_input_timeout: int = 3600,
@@ -542,6 +657,9 @@ def process_challenge(
     - `rejected`: challenge was rejected; implementer must make test pass
     - `escalated_to_human`: ambiguous; caller must wait for human response
     - `arbiter_failed`: arbiter could not rule (spawn failed, bad output)
+
+    `sealed_roots` (TD26) is passed straight through to `spawn_arbiter` —
+    see its docstring and the module-level TD26 note. Required, no fallback.
     """
     # 1. Cap check — count existing challenges BEFORE filing
     allowed, reason = check_challenge_caps(
@@ -606,6 +724,7 @@ def process_challenge(
         spawner=spawner,
         arbiter_prompt=arbiter_prompt,
         task_spec=task_spec,
+        sealed_roots=sealed_roots,
     )
     if ruling is None:
         return ChallengeResult(
@@ -618,6 +737,7 @@ def process_challenge(
             ),
             affected_criterion=challenge.criterion,
             affected_test_file=challenge.test_file,
+            sealed_roots=dict(sealed_roots),
         )
 
     _record_observation({
@@ -637,6 +757,10 @@ def process_challenge(
         ruling=ruling,
         human_input_timeout=human_input_timeout,
     )
+    # apply_ruling already carries `ruling` (with its own sealed_roots) on
+    # every branch; mirror it at the top level so a caller inspecting only
+    # the ChallengeResult (not the nested Ruling) can still see the seal.
+    result.sealed_roots = dict(ruling.sealed_roots)
 
     _record_observation({
         "type": "challenge_resolved",

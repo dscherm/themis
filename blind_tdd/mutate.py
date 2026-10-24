@@ -45,7 +45,28 @@ _CMP_SWAP = {
     ast.Lt: ast.GtE, ast.GtE: ast.Lt,
     ast.Gt: ast.LtE, ast.LtE: ast.Gt,
     ast.Eq: ast.NotEq, ast.NotEq: ast.Eq,
+    # Membership and identity are Compare operators too, and omitting them left a
+    # validator's central decision unmutatable. Measured on
+    #     if v not in allowed: raise ValueError(v)
+    # the walker found exactly one site -- the `return True` after it. A suite that never
+    # constrains an admissibility test is precisely what a mutation pass should surface,
+    # and for a project whose validators ARE the trust boundary it is the worst place to
+    # be blind.
+    ast.In: ast.NotIn, ast.NotIn: ast.In,
+    ast.Is: ast.IsNot, ast.IsNot: ast.Is,
 }
+# Adjacent-boundary swaps. SEPARATE from _CMP_SWAP so a site yields BOTH the inversion
+# and the shift: an inversion flips the whole result set and dies to almost any test, while
+# a shift differs for exactly one input and only a test ON the boundary can see it.
+#
+# Without this, boundary coverage depends on how the threshold was written. `age >= 18`
+# gets a boundary-equivalent mutant by accident, from the int-constant bump 18 -> 19.
+# `age >= LEGAL_AGE` and `a >= b` have no constant to bump and get nothing.
+_BOUNDARY_SWAP = {
+    ast.GtE: ast.Gt, ast.Gt: ast.GtE,
+    ast.LtE: ast.Lt, ast.Lt: ast.LtE,
+}
+
 _ARITH_SWAP = {ast.Add: ast.Sub, ast.Sub: ast.Add}
 _BOOL_SWAP = {ast.And: ast.Or, ast.Or: ast.And}
 
@@ -53,6 +74,7 @@ _OP_SYMBOL = {
     ast.Lt: "<", ast.GtE: ">=", ast.Gt: ">", ast.LtE: "<=",
     ast.Eq: "==", ast.NotEq: "!=", ast.Add: "+", ast.Sub: "-",
     ast.And: "and", ast.Or: "or",
+    ast.In: "in", ast.NotIn: "not in", ast.Is: "is", ast.IsNot: "is not",
 }
 
 
@@ -79,6 +101,8 @@ def _mutable_sites(tree: ast.AST) -> list[tuple]:
             for i, op in enumerate(node.ops):
                 if type(op) in _CMP_SWAP:
                     sites.append((node, "cmp", i))
+                if type(op) in _BOUNDARY_SWAP:
+                    sites.append((node, "boundary", i))
         elif isinstance(node, ast.BinOp) and type(node.op) in _ARITH_SWAP:
             sites.append((node, "arith", None))
         elif isinstance(node, ast.AugAssign) and type(node.op) in _ARITH_SWAP:
@@ -101,6 +125,11 @@ def _apply(site: tuple) -> tuple[str, str, str, int]:
         new = _CMP_SWAP[old]
         node.ops[sub] = new()
         return "comparison", _OP_SYMBOL[old], _OP_SYMBOL[new], node.lineno
+    if kind == "boundary":
+        old = type(node.ops[sub])
+        new = _BOUNDARY_SWAP[old]
+        node.ops[sub] = new()
+        return "boundary", _OP_SYMBOL[old], _OP_SYMBOL[new], node.lineno
     if kind in ("arith", "augarith"):
         old = type(node.op)
         new = _ARITH_SWAP[old]
@@ -151,6 +180,10 @@ class MutationResult:
     timed_out: int
     errored: int
     survivors: list[dict] = field(default_factory=list)
+    # One record per mutant: operator, lineno, before, after, verdict, killers. A killed
+    # mutant with no named killer is a number, not evidence -- downstream readers (the
+    # schermness evidence ladder) need the mutant x test graph.
+    records: list[dict] = field(default_factory=list)
 
     @property
     def score(self) -> float:
@@ -203,35 +236,59 @@ def run_mutation(
 
     killed = survived = timed_out = errored = 0
     survivors: list[dict] = []
+    records: list[dict] = []
     try:
         for m in mutants:
+            rec = {"operator": m.operator, "lineno": m.lineno,
+                   "before": m.before, "after": m.after, "verdict": "", "killers": []}
+            records.append(rec)
             src_path.write_text(m.source, encoding="utf-8")
             try:
                 proc = subprocess.run(
                     cmd, cwd=str(cwd) if cwd else None, env=env,
-                    capture_output=True, timeout=timeout,
+                    capture_output=True, timeout=timeout, text=True, errors="replace",
                 )
             except subprocess.TimeoutExpired:
                 timed_out += 1
+                rec["verdict"] = "timed_out"
                 continue
             except OSError:
                 errored += 1
+                rec["verdict"] = "errored"
                 continue
             if proc.returncode == 0:
                 survived += 1
+                rec["verdict"] = "survived"
                 survivors.append({
                     "operator": m.operator, "lineno": m.lineno,
                     "before": m.before, "after": m.after,
                 })
             else:
                 killed += 1
+                rec["verdict"] = "killed"
+                rec["killers"] = _failed_nodes(proc.stdout + proc.stderr)
     finally:
         src_path.write_text(original, encoding="utf-8")
 
     return MutationResult(
         total=len(mutants), killed=killed, survived=survived,
-        timed_out=timed_out, errored=errored, survivors=survivors,
+        timed_out=timed_out, errored=errored, survivors=survivors, records=records,
     )
+
+
+def _failed_nodes(output: str) -> list[str]:
+    """`file::test` for every FAILED/ERROR line in pytest's short summary (`-rfE`).
+
+    Empty when the runner printed no summary -- the mutant is still recorded as killed
+    (the exit code says so), but with no named killer, which a reader should treat as
+    weaker evidence than a kill it can attribute.
+    """
+    out: list[str] = []
+    for line in output.splitlines():
+        if line.startswith("FAILED ") or line.startswith("ERROR "):
+            node = line.split(" ", 1)[1].split(" - ")[0].strip()
+            out.append(node.replace("\\", "/"))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -245,10 +302,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=float, default=15.0,
                     help="per-mutant wall-clock bound in seconds (default: 15)")
     ap.add_argument("--cwd", default=None, help="working dir for the test command")
+    ap.add_argument("--json", default=None, metavar="PATH",
+                    help="persist every mutant's verdict and the tests that killed it")
     ns = ap.parse_args(argv)
 
     result = run_mutation(ns.src, ns.test_cmd, timeout=ns.timeout, cwd=ns.cwd)
     s = result.summary()
+    if ns.json:
+        import json
+        Path(ns.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(ns.json).write_text(json.dumps({
+            "source": str(Path(ns.src)).replace("\\", "/"),
+            "test_command": ns.test_cmd,
+            "summary": s,
+            "mutants": result.records,
+        }, indent=1), encoding="utf-8")
+        print(f"wrote {ns.json} ({len(result.records)} mutants)")
     print(f"mutants: {s['total']}  killed: {s['killed']}  survived: {s['survived']}  "
           f"timed_out: {s['timed_out']}  errored: {s['errored']}  score: {s['score']}")
     for sv in s["survivors"]:

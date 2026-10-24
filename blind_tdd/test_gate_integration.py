@@ -91,7 +91,7 @@ class _StubOrchestrator:
 def _install_stub_orch(monkey_orch):
     """Replace _make_orchestrator with a factory that returns the stub."""
     original = gi._make_orchestrator
-    gi._make_orchestrator = lambda cfg: monkey_orch
+    gi._make_orchestrator = lambda config, btd_cfg: monkey_orch
     return original
 
 
@@ -223,6 +223,96 @@ def test_red_phase_pass_saves_state():
 
             # Red state persisted
             assert (p / ".themis" / "blind_tdd" / "red_state" / "task-test-1.json").exists()
+
+
+def test_warn_mode_preflight_warnings_reach_the_gate_result():
+    """TD195/AC-1. `preflight: "warn"` never blocks, so before this fix the
+    only reader of `preflight.warnings` was the strict-mode failure branch —
+    the "public_api.md does not mention <module>" finding was computed on
+    every gate run for every dispatched task and then discarded. A ready
+    task must carry its warnings out on the result so the caller can print
+    them per task, instead of the operator finding them buried in a
+    whole-plan lint.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            # A public_api.md that mentions the module ONLY in prose, which
+            # is exactly the state the warning exists to report.
+            (p / "public_api.md").write_text(
+                "# Public API\n\nNothing is documented here yet; src.foo "
+                "is coming.\n",
+                encoding="utf-8",
+            )
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(
+                    passed=True,
+                    reason="red ok",
+                    test_file_hashes={"tests/contracts/foo.py": "abc"},
+                    triage_report={"task": "task-test-1", "triage": []},
+                ),
+            )
+            original = _install_stub_orch(stub)
+            try:
+                os.environ["RALPH_BLIND_TDD_TASK"] = "task-test-1"
+                result = gi.run_blind_tdd_gate({
+                    "gate": {"blind_tdd": {
+                        "enabled": True,
+                        "preflight": "warn",
+                        "public_api_file": "public_api.md",
+                    }}
+                })
+            finally:
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+                _restore(original)
+
+            # The task was READY — warn mode never blocks — and it still
+            # carries the warning.
+            assert result.passed
+            assert result.phase == "red"
+            assert result.preflight_warnings, "warn-mode warnings were discarded"
+            assert any("does not mention" in w and "src.foo" in w
+                       for w in result.preflight_warnings)
+            assert result.details.get("preflight_warnings") == result.preflight_warnings
+
+
+def test_a_clean_task_carries_no_preflight_warnings():
+    """Control for the above: the field is not a place where something is
+    always printed."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _write_plan(p, [VALID_TASK])
+        with _chdir(p):
+            (p / "public_api.md").write_text(
+                "# Public API\n\n## src.foo\n\n- `do_thing() -> bool` — "
+                "does the thing.\n",
+                encoding="utf-8",
+            )
+            stub = _StubOrchestrator(
+                red_result=RedPhaseResult(
+                    passed=True,
+                    reason="red ok",
+                    test_file_hashes={"tests/contracts/foo.py": "abc"},
+                    triage_report={"task": "task-test-1", "triage": []},
+                ),
+            )
+            original = _install_stub_orch(stub)
+            try:
+                os.environ["RALPH_BLIND_TDD_TASK"] = "task-test-1"
+                result = gi.run_blind_tdd_gate({
+                    "gate": {"blind_tdd": {
+                        "enabled": True,
+                        "preflight": "warn",
+                        "public_api_file": "public_api.md",
+                    }}
+                })
+            finally:
+                os.environ.pop("RALPH_BLIND_TDD_TASK", None)
+                _restore(original)
+
+            assert result.passed
+            assert result.preflight_warnings == []
 
 
 def test_second_run_goes_to_green_phase():
@@ -385,6 +475,40 @@ def test_red_state_round_trip():
             assert loaded["spawn_agent_id"] == "sess-7"
             gi.clear_red_state("t")
             assert gi.load_red_state("t") is None
+
+
+def test_red_state_records_sealed_roots_when_present():
+    """AC4: which roots the blindness seal actually denied must be
+    auditable from the durable red-state artifact, not just the ephemeral
+    active_session.json (deleted on every deactivate())."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            r = RedPhaseResult(
+                passed=True,
+                test_file_hashes={"a": "1"},
+                triage_report={},
+                sealed_roots={
+                    "blocked_paths": ["server/**", "core/**", ".git/**"],
+                    "roots": ["server", "core"],
+                    "languages": ["python"],
+                    "method": "language-scan",
+                },
+            )
+            gi.save_red_state("t", r)
+            loaded = gi.load_red_state("t")
+            assert loaded["sealed_roots"]["roots"] == ["server", "core"]
+            assert loaded["sealed_roots"]["languages"] == ["python"]
+
+
+def test_red_state_omits_sealed_roots_when_absent():
+    """Back-compat: a RedPhaseResult with no sealed_roots (legacy/direct-API
+    orchestrator construction) must not add a misleading empty field."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            r = RedPhaseResult(passed=True, test_file_hashes={}, triage_report={})
+            gi.save_red_state("t", r)
+            loaded = gi.load_red_state("t")
+            assert "sealed_roots" not in loaded
 
 
 def _pay_task(task_id: str, module: str, files: list[str], tags: list[str] | None = None) -> dict:
@@ -820,7 +944,11 @@ def _run_all() -> int:
         test_green_fail_warn_does_not_block,
         test_invalid_task_fails_strict,
         test_invalid_task_warns_but_passes,
+        test_warn_mode_preflight_warnings_reach_the_gate_result,
+        test_a_clean_task_carries_no_preflight_warnings,
         test_red_state_round_trip,
+        test_red_state_records_sealed_roots_when_present,
+        test_red_state_omits_sealed_roots_when_absent,
         test_hash_break_feeds_escalation_for_next_run,
         test_seal_record_tamper_is_recorded,
         test_red_saves_suppression_baseline_by_default,
