@@ -35,6 +35,20 @@ event: `challenge_filed`, `challenge_cap_exceeded`, `arbiter_ruling`,
 `challenge_resolved`. These feed the dashboard tiles planned in
 Phase C2.
 
+## Upheld rulings and the red seal (2026-10-24)
+
+An upheld ruling deletes a file the red phase hash-locked. Twice in
+ralph-universal (BL-2, BM-1) the writer then recreated the file with only
+the prescribed change and the next green run reported "test file integrity
+compromised" — for a rewrite this module had ordered. So `apply_ruling` now
+also records the ruling in the task's red state
+(`gate_integration.record_pending_ruling`); the next gate run re-hashes that
+one file, moves the ruling to `rulings_applied`, and cites it. The record is
+HMAC-covered when a seal key is configured, so a key-less process (an
+implementer with Bash) cannot append a forged "upheld" entry; in that case
+`apply_ruling` reports the refusal in `ChallengeResult.reseal_note` and the
+green check keeps flagging the file, as before.
+
 ## This module does NOT
 
 - spawn Agent #1 for test rewrites (that's the orchestrator's red
@@ -193,6 +207,11 @@ class ChallengeResult:
     # can still tell whether this challenge was arbitrated under a seal.
     # Empty for cap_exceeded/arbiter_failed outcomes — no arbiter ran.
     sealed_roots: dict = field(default_factory=dict)
+    # Upheld only: whether the task's red state now records this ruling as a
+    # pending rewrite (so the next gate run re-seals the file), and why not
+    # when it does not. Empty for every other outcome.
+    reseal_recorded: bool = False
+    reseal_note: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -206,6 +225,8 @@ class ChallengeResult:
             "affected_test_file": self.affected_test_file,
             "cap_reason": self.cap_reason,
             "sealed_roots": dict(self.sealed_roots),
+            "reseal_recorded": self.reseal_recorded,
+            "reseal_note": self.reseal_note,
         }
 
 
@@ -481,17 +502,32 @@ def apply_ruling(
                 affected_criterion=ruling.criterion_affected,
                 affected_test_file=str(test_path),
             )
+        # Deferred import: gate_integration imports orchestrator at module
+        # load and this module is imported by callers that never touch the
+        # gate; importing it at module scope here would be circular.
+        from .gate_integration import record_pending_ruling
+
+        recorded, note = record_pending_ruling(
+            challenge.task_id,
+            challenge_id=challenge.challenge_id,
+            test_file=challenge.test_file,
+            criterion_affected=ruling.criterion_affected,
+            resolution=ruling.resolution,
+        )
         return ChallengeResult(
             success=True,
             action="test_deleted" if deleted else "test_already_missing",
             challenge_id=challenge.challenge_id,
             message=(
                 f"challenge upheld: {test_path} removed. Rewrite tests for "
-                f"{ruling.criterion_affected} with the arbiter's reasoning as context."
+                f"{ruling.criterion_affected} with the arbiter's reasoning as context. "
+                f"Red seal: {note}."
             ),
             ruling=ruling,
             affected_criterion=ruling.criterion_affected,
             affected_test_file=str(test_path),
+            reseal_recorded=recorded,
+            reseal_note=note,
         )
 
     if verdict == "rejected":

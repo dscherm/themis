@@ -681,6 +681,141 @@ def test_process_challenge_carries_sealed_roots_at_top_level():
 
 
 # ---------------------------------------------------------------------------
+# apply_ruling → red state (post-ruling re-seal, see gate_integration docstring)
+# ---------------------------------------------------------------------------
+
+def _seal_red_state(task_id: str, test_file: Path, content: str) -> str:
+    """Write `test_file`, seal a red state over it, return the sealed hash."""
+    import hashlib
+    from blind_tdd import gate_integration as gi
+    from blind_tdd.orchestrator import RedPhaseResult, _hash_test_files
+
+    _write_test_file(test_file, content)
+    hashes = _hash_test_files([test_file.parent])
+    gi.save_red_state(task_id, RedPhaseResult(
+        passed=True, test_file_hashes=hashes, triage_report={"triage": []},
+    ))
+    # Hash the bytes on disk, not the string: write_text translates newlines.
+    return hashlib.sha256(test_file.read_bytes()).hexdigest()
+
+
+def _upheld(chal: "ch.Challenge", resolution: str = "rewrite narrowly") -> "ch.Ruling":
+    return ch.Ruling(
+        challenge_id=chal.challenge_id, task_id=chal.task_id,
+        ruling="upheld", reasoning="assertion contradicts its own fixture",
+        criterion_affected="AC-1", resolution=resolution,
+    )
+
+
+def test_apply_ruling_upheld_records_pending_ruling_in_red_state():
+    """BL-2 / BM-1: the deleted file's sealed hash must stay recoverable, keyed
+    by the ruling, so the next gate run can re-seal the ordered rewrite."""
+    from blind_tdd import gate_integration as gi
+
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            test_path = Path("tests/contracts/test_foo.py")
+            sealed = _seal_red_state("t", test_path, "def test_foo(): assert 1 == 2\n")
+            # The challenge names the file with forward slashes; the seal key
+            # is str(Path) (backslashes on Windows). Both must resolve to one.
+            chal = ch.file_challenge(
+                task_id="t", test_file="tests/contracts/test_foo.py",
+                test_name="test_foo", criterion="AC-1", argument="x",
+            )
+            result = ch.apply_ruling(challenge=chal, ruling=_upheld(chal, "fix line 2"))
+            assert result.success and result.action == "test_deleted"
+            assert result.reseal_recorded, result.reseal_note
+            assert chal.challenge_id in result.message
+
+            state = gi.load_red_state("t")
+            pending = state["pending_rulings"]
+            assert len(pending) == 1
+            entry = pending[0]
+            assert entry["challenge_id"] == chal.challenge_id
+            assert entry["test_file"] == "tests/contracts/test_foo.py"
+            assert entry["criterion_affected"] == "AC-1"
+            assert entry["resolution"] == "fix line 2"
+            assert entry["sealed_hash"] == sealed
+            # The seal itself is untouched: the OLD hash still stands until a
+            # rewrite exists for the gate to re-hash.
+            assert list(state["test_file_hashes"].values()) == [sealed]
+
+
+def test_apply_ruling_upheld_without_red_state_reports_nothing_to_reseal():
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            test_path = Path("tests/contracts/test_foo.py")
+            _write_test_file(test_path)
+            chal = ch.file_challenge(
+                task_id="t", test_file=str(test_path), test_name="test_foo",
+                criterion="AC-1", argument="x",
+            )
+            result = ch.apply_ruling(challenge=chal, ruling=_upheld(chal))
+            assert result.success and result.action == "test_deleted"
+            assert not test_path.exists()
+            assert result.reseal_recorded is False
+            assert "no red state" in result.reseal_note
+
+
+def test_apply_ruling_upheld_resigns_a_signed_red_state():
+    """With THEMIS_SEAL_KEY present the record is re-signed over the new
+    pending entry, so green's seal verification still passes."""
+    from blind_tdd import gate_integration as gi
+
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            os.environ[gi.SEAL_KEY_ENV] = "unit-test-key"
+            try:
+                test_path = Path("tests/contracts/test_foo.py")
+                _seal_red_state("t", test_path, "def test_foo(): assert 1 == 2\n")
+                before = gi.load_red_state("t")["seal_hmac"]
+                chal = ch.file_challenge(
+                    task_id="t", test_file=str(test_path), test_name="test_foo",
+                    criterion="AC-1", argument="x",
+                )
+                result = ch.apply_ruling(challenge=chal, ruling=_upheld(chal))
+                assert result.reseal_recorded, result.reseal_note
+                state = gi.load_red_state("t")
+                assert state["seal_hmac"] != before
+                ok, reason = gi.verify_red_state_seal(state)
+                assert ok, reason
+                # And the pending entry is under the HMAC: forging one fails.
+                state["pending_rulings"].append({"challenge_id": "chal-forged"})
+                ok, _ = gi.verify_red_state_seal(state)
+                assert not ok
+            finally:
+                os.environ.pop(gi.SEAL_KEY_ENV, None)
+
+
+def test_apply_ruling_upheld_refuses_to_unsign_a_signed_red_state():
+    """A key-less process (an implementer with Bash) must not be able to turn
+    a signed record into an unsigned one by routing a forged ruling through
+    apply_ruling: the test is still deleted, but the seal is left alone and
+    the refusal is reported."""
+    from blind_tdd import gate_integration as gi
+
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(Path(td)):
+            test_path = Path("tests/contracts/test_foo.py")
+            os.environ[gi.SEAL_KEY_ENV] = "unit-test-key"
+            try:
+                _seal_red_state("t", test_path, "def test_foo(): assert 1 == 2\n")
+            finally:
+                os.environ.pop(gi.SEAL_KEY_ENV, None)
+            before = gi.load_red_state("t")
+
+            chal = ch.file_challenge(
+                task_id="t", test_file=str(test_path), test_name="test_foo",
+                criterion="AC-1", argument="x",
+            )
+            result = ch.apply_ruling(challenge=chal, ruling=_upheld(chal))
+            assert result.success and result.action == "test_deleted"
+            assert not test_path.exists()
+            assert result.reseal_recorded is False
+            assert "unavailable" in result.reseal_note
+            assert gi.load_red_state("t") == before
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -711,6 +846,10 @@ def _run_all() -> int:
         test_process_challenge_arbiter_failure_reports_cleanly,
         test_process_challenge_ambiguous_escalates,
         test_process_challenge_carries_sealed_roots_at_top_level,
+        test_apply_ruling_upheld_records_pending_ruling_in_red_state,
+        test_apply_ruling_upheld_without_red_state_reports_nothing_to_reseal,
+        test_apply_ruling_upheld_resigns_a_signed_red_state,
+        test_apply_ruling_upheld_refuses_to_unsign_a_signed_red_state,
     ]
     failed = 0
     for t in tests:

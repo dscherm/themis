@@ -41,12 +41,46 @@ red-phase output at `.themis/blind_tdd/red_state/<task_id>.json`:
       "timestamp": "2026-04-10T21:00:00Z",
       "test_file_hashes": { "tests/contracts/foo.py": "abc..." },
       "triage_report": { ... },
-      "red_session_id": "blind-test_writer-ab12cd34"
+      "red_session_id": "blind-test_writer-ab12cd34",
+      "pending_rulings": [ { "challenge_id": "chal-task-42-ab12cd34",
+                             "test_file": "tests/contracts/foo.py",
+                             "criterion_affected": "AC-2",
+                             "sealed_hash": "abc..." } ],
+      "rulings_applied": [ { ...same keys..., "resealed_hash": "def..." } ]
     }
 
 On the next gate run, if this file exists, we skip red and go straight
 to green. The file is deleted on green-pass so the next task can start
 a fresh red phase.
+
+## Post-ruling re-seal
+
+`pending_rulings` and `rulings_applied` exist because of BL-2 and BM-1
+(ralph-universal, 2026-10-24). In both, an implementer challenged a blind
+test, a fresh arbiter UPHELD it, `challenge.apply_ruling` deleted the file
+and a writer recreated it with only the prescribed change — but the red
+state still held the OLD hash, so the next green run reported "test file
+integrity compromised" for a rewrite the engine itself had ordered. Under
+`enforcement: warn` that passed with a false tamper record in the ledger;
+under `strict` it would have blocked the ordered rewrite outright.
+
+Now `apply_ruling` records the upheld ruling in the task's red state as a
+pending entry (`record_pending_ruling`), and the next gate run performs a
+**post-ruling re-seal** (`reseal_after_rulings`) before the green hash
+check: the ONE file the ruling names is re-hashed, the ruling id moves to
+`rulings_applied`, and every other sealed hash is kept exactly as the
+original red phase recorded it. The green check then accepts the ordered
+rewrite, still flags any other modified file, and the gate result cites
+the ruling. A file the ruling names that is still missing, or that is
+byte-identical to the sealed version, keeps the task in
+`ruling_rewrite_pending` — the rewrite has not happened yet.
+
+This is deliberately NOT a full red re-run. The red phase here never
+required the tests to fail (it checks blind authorship and coverage, not
+observed failure), so re-running it would buy nothing on that axis — and
+re-hashing the whole tree would launder any unrelated edit made during the
+implementation window. See docs/post-ruling-reseal.md for the full
+decision record and the trust boundary it leaves in place.
 """
 
 from __future__ import annotations
@@ -342,7 +376,13 @@ def _seal_key() -> bytes | None:
 # fingerprint (an implementer pointing the record at a weakened pack), and
 # the sealed_roots audit record (an implementer rewriting the record to
 # claim a blindness seal that didn't actually hold at red time).
-_SEAL_EXTRA_KEYS = ("suppression_baseline", "security_pack", "sealed_roots")
+# `pending_rulings` / `rulings_applied` ride under the HMAC too: a signed
+# record can only acquire a sanctioned rewrite through a process holding the
+# key, never by an implementer appending a forged "upheld" entry.
+_SEAL_EXTRA_KEYS = (
+    "suppression_baseline", "security_pack", "sealed_roots",
+    "pending_rulings", "rulings_applied",
+)
 
 
 def _seal_extras(state: dict) -> dict:
@@ -455,6 +495,203 @@ def _red_state_to_result(state: dict) -> RedPhaseResult:
         reason="loaded from red state",
         test_file_hashes=dict(state.get("test_file_hashes") or {}),
         triage_report=dict(state.get("triage_report") or {}),
+        rulings_applied=list(state.get("rulings_applied") or []),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Post-ruling re-seal (see the module docstring)
+# ---------------------------------------------------------------------------
+
+def _norm_path(p: str) -> str:
+    """Comparison form for a test-file path: `_hash_test_files` keys are
+    `str(Path)` (backslashes on Windows), challenge docs carry whatever the
+    implementer typed (usually forward slashes)."""
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def _sealed_key_for(hashes: dict, test_file: str) -> str | None:
+    """The key in `test_file_hashes` that names `test_file`, if any."""
+    want = _norm_path(test_file)
+    for k in hashes:
+        if _norm_path(k) == want:
+            return k
+    return None
+
+
+def _rewrite_red_state(task_id: str, mutate) -> tuple[dict | None, str]:
+    """Load, verify, mutate, re-sign and write a task's red state.
+
+    Returns (new_state, reason). `new_state` is None when the record does not
+    exist or cannot be trusted — a signed record whose key is unavailable, or
+    whose HMAC no longer verifies. Refusing is the point: rewriting a signed
+    record from a key-less process would leave it UNSIGNED, and an unsigned
+    record verifies trivially at green, so "could not re-sign" must never
+    degrade into "wrote it anyway".
+    """
+    state = load_red_state(task_id)
+    if state is None:
+        return None, f"no red state for task {task_id!r}"
+    ok, reason = verify_red_state_seal(state)
+    if not ok:
+        return None, f"refusing to rewrite red state: {reason}"
+    mutate(state)
+    key = _seal_key()
+    if key is not None:
+        state["seal_hmac"] = _seal_signature(
+            task_id, state.get("test_file_hashes") or {}, key,
+            extras=_seal_extras(state),
+        )
+    _red_state_path(task_id).write_text(
+        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+    return state, "ok"
+
+
+def record_pending_ruling(
+    task_id: str,
+    *,
+    challenge_id: str,
+    test_file: str,
+    criterion_affected: str,
+    resolution: str = "",
+) -> tuple[bool, str]:
+    """Mark `test_file` as ordered-rewritten by an upheld ruling.
+
+    Called by `challenge.apply_ruling` right after it deletes the disputed
+    file. The entry carries the hash the red phase sealed for that file, so
+    the re-seal can tell "rewritten" from "restored unchanged".
+
+    Returns (recorded, note). Not recorded when the task has no red state
+    (a challenge filed outside a gated red phase) or when the record is
+    signed and cannot be re-signed here — see `_rewrite_red_state`.
+    """
+    def _mutate(state: dict) -> None:
+        hashes = state.get("test_file_hashes") or {}
+        key = _sealed_key_for(hashes, test_file)
+        pending = [
+            e for e in (state.get("pending_rulings") or [])
+            if e.get("challenge_id") != challenge_id
+        ]
+        pending.append({
+            "challenge_id": challenge_id,
+            "test_file": Path(test_file).as_posix(),
+            "criterion_affected": str(criterion_affected).upper(),
+            "resolution": resolution,
+            "sealed_hash": hashes.get(key) if key else None,
+            "applied_at": _now_iso(),
+        })
+        state["pending_rulings"] = pending
+
+    state, reason = _rewrite_red_state(task_id, _mutate)
+    if state is None:
+        return False, reason
+    return True, (
+        f"red state for {task_id!r} now records {challenge_id} as a pending "
+        f"rewrite of {Path(test_file).as_posix()}; the next gate run re-seals "
+        f"that file once it has been rewritten"
+    )
+
+
+def reseal_after_rulings(
+    task_id: str,
+    state: dict,
+    *,
+    triage_report: dict | None = None,
+) -> tuple[dict, list[dict], list[dict]]:
+    """Re-hash the files that upheld rulings ordered rewritten — those only.
+
+    For each `pending_rulings` entry: if the named file exists with a hash
+    different from the sealed one, its hash is replaced and the entry moves
+    to `rulings_applied` with both hashes. A file that is missing, or
+    byte-identical to the sealed version, stays pending with a `status`.
+    No other key of `test_file_hashes` is touched, so an unrelated edit made
+    in the same window is still caught by the green hash check.
+
+    `triage_report`, when given (an automated writer resumed under the
+    ruling), replaces the stored one — it is the merged report
+    `resume_red_phase_after_ruling` produced.
+
+    Returns (state, applied_now, still_pending). `state` is the record as
+    written (or the input, untouched, when nothing could be applied).
+    """
+    pending = list(state.get("pending_rulings") or [])
+    hashes = dict(state.get("test_file_hashes") or {})
+    applied_now: list[dict] = []
+    still_pending: list[dict] = []
+    for entry in pending:
+        test_file = str(entry.get("test_file", ""))
+        key = _sealed_key_for(hashes, test_file) or str(Path(test_file))
+        p = Path(test_file)
+        if not p.is_file():
+            still_pending.append({**entry, "status": "missing"})
+            continue
+        try:
+            current = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            still_pending.append({**entry, "status": "unreadable"})
+            continue
+        if current == entry.get("sealed_hash"):
+            still_pending.append({**entry, "status": "unchanged"})
+            continue
+        hashes[key] = current
+        applied_now.append({
+            **{k: v for k, v in entry.items() if k != "status"},
+            "resealed_hash": current,
+            "resealed_at": _now_iso(),
+            "resealed_by": (
+                "post-ruling re-seal: the gate re-hashed the one file the upheld "
+                "ruling ordered rewritten; no other sealed hash changed; the "
+                "rewrite's content was not checked against the resolution"
+            ),
+        })
+
+    if not applied_now and triage_report is None:
+        return state, [], still_pending
+
+    def _mutate(st: dict) -> None:
+        st["test_file_hashes"] = hashes
+        remaining = [
+            {k: v for k, v in e.items() if k != "status"} for e in still_pending
+        ]
+        if remaining:
+            st["pending_rulings"] = remaining
+        else:
+            st.pop("pending_rulings", None)
+        st["rulings_applied"] = list(st.get("rulings_applied") or []) + applied_now
+        if triage_report is not None:
+            st["triage_report"] = triage_report
+
+    new_state, _reason = _rewrite_red_state(task_id, _mutate)
+    if new_state is None:
+        # Cannot re-sign → leave the record alone; the green hash check will
+        # report the mismatch as it always did. Nothing was applied.
+        return state, [], still_pending + [
+            {**a, "status": "unsigned_record_refused"} for a in applied_now
+        ]
+    return new_state, applied_now, still_pending
+
+
+def _load_ruling_doc(challenge_id: str) -> dict | None:
+    p = Path(".themis") / "blind_tdd" / "rulings" / f"{challenge_id}.json"
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _describe_pending(entries: list[dict]) -> str:
+    status_text = {
+        "missing": "deleted by the ruling and not yet rewritten",
+        "unchanged": "byte-identical to the sealed version — the ordered rewrite has not happened",
+        "unreadable": "present but unreadable",
+        "unsigned_record_refused": "rewritten, but the signed red state cannot be re-signed here",
+    }
+    return "; ".join(
+        f"{e.get('challenge_id')} ({e.get('criterion_affected')}) ordered a rewrite "
+        f"of {e.get('test_file')}: {status_text.get(e.get('status'), e.get('status'))}"
+        for e in entries
     )
 
 
@@ -1015,6 +1252,93 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
             },
         )
 
+    # ---- POST-RULING RE-SEAL ----
+    # An upheld challenge ordered a file rewritten (see the module docstring).
+    # Re-hash that file — and only that file — before the green check, so the
+    # ordered rewrite is accepted and cited while any other edit still fails.
+    ruling_details: dict = {}
+    if red_state.get("pending_rulings"):
+        red_state, applied_now, still_pending = reseal_after_rulings(task_id, red_state)
+        if still_pending and btd_cfg["spawner"] == "claude_code":
+            # Automated writer available: resume the red phase for the
+            # affected criterion. The manual spawner is NOT routed here — its
+            # completion check would see the original triage report and call
+            # a writer that never ran "complete".
+            orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
+            if orch_error is not None:
+                return orch_error
+            resumed_triage: dict | None = None
+            for entry in still_pending:
+                ruling_doc = _load_ruling_doc(str(entry.get("challenge_id", ""))) or {
+                    "challenge_id": entry.get("challenge_id"),
+                    "criterion_affected": entry.get("criterion_affected"),
+                    "reasoning": "",
+                    "resolution": entry.get("resolution", ""),
+                }
+                try:
+                    resumed = orch.resume_red_phase_after_ruling(
+                        task, _red_state_to_result(red_state), ruling_doc,
+                    )
+                except Exception as e:  # defensive — must never raise to smart_gate
+                    return BlindGateResult(
+                        passed=False, phase="error",
+                        message=f"post-ruling writer resume crashed: {type(e).__name__}: {e}",
+                        reason="ruling_resume_crash",
+                        task_id=task_id,
+                    )
+                if not resumed.passed:
+                    fail = btd_cfg["enforcement"] == "strict"
+                    return BlindGateResult(
+                        passed=not fail,
+                        phase="red",
+                        message=(
+                            f"writer resume after upheld ruling "
+                            f"{entry.get('challenge_id')} did not pass: {resumed.reason}"
+                        ),
+                        reason="ruling_rewrite_failed",
+                        task_id=task_id,
+                        details={
+                            "pending_rulings": still_pending,
+                            "spawn_result": resumed.spawn_result,
+                            "violations": resumed.violations,
+                            **escalation_details,
+                        },
+                    )
+                resumed_triage = resumed.triage_report
+            red_state, applied_more, still_pending = reseal_after_rulings(
+                task_id, red_state, triage_report=resumed_triage,
+            )
+            applied_now = applied_now + applied_more
+        if still_pending:
+            fail = btd_cfg["enforcement"] == "strict"
+            return BlindGateResult(
+                passed=not fail,
+                phase="green",
+                message=(
+                    f"green phase not run for task {task_id!r}: an upheld ruling's "
+                    f"rewrite is outstanding — {_describe_pending(still_pending)}. "
+                    f"Rewrite the file at the same path per the ruling's resolution, "
+                    f"then re-run the gate."
+                ),
+                reason="ruling_rewrite_pending",
+                task_id=task_id,
+                details={
+                    "pending_rulings": still_pending,
+                    "rulings_applied": list(red_state.get("rulings_applied") or []),
+                    **escalation_details,
+                },
+            )
+    applied_all = list(red_state.get("rulings_applied") or [])
+    if applied_all:
+        ids = ", ".join(str(a.get("challenge_id")) for a in applied_all)
+        ruling_details = {"rulings_applied": applied_all}
+        ruling_note = (
+            f" {len(applied_all)} sealed file(s) re-hashed under upheld "
+            f"ruling(s) {ids}."
+        )
+    else:
+        ruling_note = ""
+
     red_result = _red_state_to_result(red_state)
     orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
     if orch_error is not None:
@@ -1036,10 +1360,15 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
             # it feeds routing so similar tasks are escalated before spawn.
             record_tamper(task, KIND_TEST_HASH_BREAK, green.reason)
         fail = btd_cfg["enforcement"] == "strict"
+        break_note = ""
+        if green.hash_break and ruling_note:
+            break_note = (
+                f"{ruling_note} The file(s) named above are covered by no ruling."
+            )
         return BlindGateResult(
             passed=not fail,
             phase="green",
-            message=f"green phase did not pass: {green.reason}",
+            message=f"green phase did not pass: {green.reason}{break_note}",
             reason="green_failed",
             task_id=task_id,
             details={
@@ -1047,6 +1376,7 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
                 "hash_break": green.hash_break,
                 "violations": green.violations,
                 "green_report_summary": _summarize_green(green),
+                **ruling_details,
                 **escalation_details,
             },
         )
@@ -1087,13 +1417,14 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
         message=(
             f"green phase passed for task {task_id!r}: "
             f"{green.green_report.get('tests_passed', 0)} test(s) passing, "
-            f"coverage verified." + suppression_warning
+            f"coverage verified." + ruling_note + suppression_warning
         ),
         task_id=task_id,
         details={
             "tests_passed": green.green_report.get("tests_passed"),
             "tests_failed": green.green_report.get("tests_failed"),
             "hash_match": True,
+            **ruling_details,
             **escalation_details,
             **suppression_details,
         },

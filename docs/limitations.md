@@ -161,6 +161,16 @@ per-task and per-criterion challenge caps, and an `ambiguous` ruling that escala
 to a human instead of auto-deleting. It is a smaller surface than letting the
 implementer edit tests directly, but it is not zero.
 
+An upheld ruling also licenses exactly one rewrite: the gate re-hashes the file
+the ruling names and accepts whatever the writer put there, citing the ruling
+id ([`docs/post-ruling-reseal.md`](post-ruling-reseal.md)). It does not check
+that the rewrite matches the arbiter's `resolution` — the record keeps both
+hashes so a human can diff it, but nothing mechanical reads the resolution.
+Every other sealed file stays locked, a rewrite at a different path is flagged
+like any other change, and with `THEMIS_SEAL_KEY` set the pending/applied
+records ride under the same HMAC as the baseline, so a key-less implementer
+cannot forge an "upheld" entry to license its own edit.
+
 ## Results are per-model snapshots
 
 The prompts, the blindness-compliance behavior, and the measured cheat rates are

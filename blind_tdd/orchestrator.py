@@ -1137,6 +1137,11 @@ class RedPhaseResult:
     # was constructed without an explicit/derived blocked_paths (falls back
     # to session.py's generic defaults, unrecorded — legacy/direct-API path).
     sealed_roots: dict = field(default_factory=dict)
+    # Upheld challenge rulings whose ordered rewrite the gate re-sealed into
+    # this baseline (gate_integration.reseal_after_rulings). Each entry names
+    # the challenge, the file, and the hash before/after. Empty for a baseline
+    # no ruling touched.
+    rulings_applied: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1145,6 +1150,9 @@ class GreenPhaseResult:
     reason: str = ""
     green_report: dict = field(default_factory=dict)
     hash_match: bool = False
+    # Carried through from the red baseline so a green verdict says which
+    # sealed hashes were replaced under an upheld ruling (and which ruling).
+    rulings_applied: list[dict] = field(default_factory=list)
     # True only when the seal comparison actually ran and found a modified
     # test file — hash_match alone can't distinguish tampering from a spawn
     # failure that never got as far as hashing.
@@ -1412,6 +1420,7 @@ class BlindTddOrchestrator:
                         "test_dirs": self.test_dirs,
                         "red_phase_hashes": red_result.test_file_hashes,
                         "triage_report": red_result.triage_report,
+                        "rulings_applied": list(red_result.rulings_applied),
                         "session_id": session["session_id"],
                     },
                 )
@@ -1480,6 +1489,7 @@ class BlindTddOrchestrator:
                 green_report=green_report,
                 hash_match=False,
                 hash_break=True,
+                rulings_applied=list(red_result.rulings_applied),
                 spawn_result=spawn_result,
                 violations=violations,
             )
@@ -1579,6 +1589,9 @@ class BlindTddOrchestrator:
             "tests_failed": green_report.get("tests_failed"),
             "coverage_verified": True,
             "hash_match": True,
+            "rulings_applied": [
+                a.get("challenge_id") for a in red_result.rulings_applied
+            ],
         })
 
         return GreenPhaseResult(
@@ -1586,6 +1599,7 @@ class BlindTddOrchestrator:
             reason="green phase passed",
             green_report=green_report,
             hash_match=True,
+            rulings_applied=list(red_result.rulings_applied),
             coverage=coverage,
             spawn_result=spawn_result,
         )
