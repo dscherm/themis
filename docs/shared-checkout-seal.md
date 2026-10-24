@@ -41,6 +41,24 @@ Out-of-scope files show up in the gate result's message and in
 `details["out_of_scope_files"]` (path → reason) on both pass and fail, so a
 human can still see them.
 
+### Attribution order for a new file
+
+`_new_file_scope` decides in this order; the first rule that fires wins.
+
+1. `conftest.py`: in scope (it reaches every sealed test in its directory).
+2. A `Bead: <id>` line in the Python module docstring (a syntax error is
+   tolerated and skips this rule). This task's id: in scope. Another id:
+   `out of scope: Bead: <id>`, even if the file name names this task.
+3. The file name names this task. `_task_id_pattern` lets the id's own
+   separators (`-`, `.`, `_`) match an optional `-`, `_` or nothing, so `COV-1`
+   matches `test_cov1_x.py`, `test_cov-1_x.py` and `test_cov_1_x.py`, while
+   `cov12` and `td110` stay non-matches.
+4. `Covers:` tags for this task's criteria. If every such tag carries a
+   qualifier (`AC-1 (GF-4)`) and none names this task, the file is out of
+   scope. Otherwise the earlier name-for-another-task rule applies.
+5. An unqualified tag with no Bead line and no name match breaks the seal, as
+   before. No tag for this task's criteria: out of scope.
+
 ### Why the seal stays whole-tree
 
 The brief asked that "any pre-existing sealed test must still be flagged if

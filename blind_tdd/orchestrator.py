@@ -379,11 +379,29 @@ def _task_id_pattern(task_id: str) -> re.Pattern[str]:
     """Match `task_id` as a whole token, so TD1 does not match TD110.
 
     Neither side may be an adjacent alphanumeric: `test_td10_export.py`
-    matches TD10, `test_td110_library.py` does not.
+    matches TD10, `test_td110_library.py` does not. The id's own separators
+    (`-`, `.`, `_`) match an optional `-`, `_` or nothing, so COV-1 matches
+    `test_cov1_x.py`, `test_cov-1_x.py` and `test_cov_1_x.py` but not cov12.
     """
-    return re.compile(
-        rf"(?<![0-9a-z]){re.escape(task_id.lower())}(?![0-9a-z])"
-    )
+    parts = [p for p in re.split(r"[-._]+", task_id.lower()) if p]
+    body = "[-_]?".join(re.escape(p) for p in parts) if parts else re.escape(task_id.lower())
+    return re.compile(rf"(?<![0-9a-z]){body}(?![0-9a-z])")
+
+
+_BEAD_LINE = re.compile(r"^[ 	]*Bead:[ 	]*([A-Za-z0-9][A-Za-z0-9._-]*)", re.MULTILINE)
+
+
+def _bead_of(path: str) -> str | None:
+    """The id on a `Bead: <id>` line of a Python file's module docstring."""
+    if not str(path).lower().endswith(".py"):
+        return None
+    try:
+        import ast
+        doc = ast.get_docstring(ast.parse(Path(path).read_text(encoding="utf-8")))
+    except (SyntaxError, ValueError, OSError):
+        return None
+    m = _BEAD_LINE.search(doc or "")
+    return m.group(1) if m else None
 
 
 @dataclass
@@ -442,6 +460,11 @@ def _new_file_scope(path: str, *, task: dict, known_task_ids) -> str:
     name = Path(path).name.lower()
     if name == "conftest.py":
         return "new conftest.py (reaches every sealed test in its directory)"
+    bead = _bead_of(path)
+    if bead:
+        if task_id and bead.lower() == task_id.lower():
+            return f"new file declaring `Bead: {bead}`"
+        return f"out of scope: Bead: {bead}"
     if task_id and _task_id_pattern(task_id).search(name):
         return f"new file named for {task_id}"
 
@@ -450,10 +473,19 @@ def _new_file_scope(path: str, *, task: dict, known_task_ids) -> str:
         for c in (task.get("acceptance_criteria") or [])
         if isinstance(c, dict) and c.get("id")
     }
-    tagged = sorted(
-        {ac for ann in extract_covers_from_file(path) for ac in ann.covers} & criteria
-    )
+    annotations = extract_covers_from_file(path)
+    tagged = sorted({ac for ann in annotations for ac in ann.covers} & criteria)
     if tagged:
+        quals: set = set()
+        for ann in annotations:
+            for ac, qs in ann.covers_tasks.items():
+                if ac.upper() in criteria:
+                    quals.update(None if q is None else str(q).lower() for q in (qs or [None]))
+        if quals and None not in quals and task_id.lower() not in quals:
+            return (
+                f"out of scope: `Covers:` {', '.join(tagged)} qualified for "
+                f"{', '.join(sorted(quals))}"
+            )
         others = [
             t for t in known_task_ids
             if t and t != task_id and _task_id_pattern(str(t)).search(name)
