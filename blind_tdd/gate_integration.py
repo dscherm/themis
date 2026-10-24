@@ -225,6 +225,29 @@ def _find_task_in_plan(task_id: str) -> dict | None:
     return None
 
 
+def _all_task_ids_in_plan() -> list[str]:
+    """Every task id in plan.md / fix_plan.md JSON blocks, in file order."""
+    ids: list[str] = []
+    for plan_path in ("plan.md", "fix_plan.md"):
+        p = Path(plan_path)
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for block in _extract_json_blocks(text):
+            try:
+                obj = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            for task in _iter_tasks(obj):
+                tid = str(task.get("id", "") or "")
+                if tid and tid not in ids:
+                    ids.append(tid)
+    return ids
+
+
 def _find_first_incomplete_task() -> dict | None:
     """Return the first task in plan.md with `passes: false`."""
     for plan_path in ("plan.md", "fix_plan.md"):
@@ -1343,6 +1366,8 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
     orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
     if orch_error is not None:
         return orch_error
+    # Lets the seal check attribute a new test file to the task it names.
+    orch.known_task_ids = _all_task_ids_in_plan()
     try:
         green = orch.run_green_phase(task, red_result)
     except Exception as e:
@@ -1412,18 +1437,27 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
         if qr_result is not None:
             return qr_result
 
+    out_of_scope = dict(getattr(green, "out_of_scope_files", {}) or {})
+    out_of_scope_note = (
+        f" {len(out_of_scope)} test file(s) appeared after the seal and were "
+        f"judged another task's — not sealed, not counted toward coverage: "
+        f"{sorted(out_of_scope)[:5]}."
+        if out_of_scope else ""
+    )
     return BlindGateResult(
         passed=True, phase="green",
         message=(
             f"green phase passed for task {task_id!r}: "
             f"{green.green_report.get('tests_passed', 0)} test(s) passing, "
             f"coverage verified." + ruling_note + suppression_warning
+            + out_of_scope_note
         ),
         task_id=task_id,
         details={
             "tests_passed": green.green_report.get("tests_passed"),
             "tests_failed": green.green_report.get("tests_failed"),
             "hash_match": True,
+            "out_of_scope_files": out_of_scope,
             **ruling_details,
             **escalation_details,
             **suppression_details,
@@ -1520,4 +1554,7 @@ def _summarize_green(green: GreenPhaseResult) -> dict:
         "tests_passed": rep.get("tests_passed"),
         "tests_failed": rep.get("tests_failed"),
         "overall": rep.get("overall"),
+        # New test files that appeared after the seal and belong to another
+        # task (docs/shared-checkout-seal.md). Not sealed, not counted.
+        "out_of_scope_files": dict(getattr(green, "out_of_scope_files", {}) or {}),
     }

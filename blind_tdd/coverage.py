@@ -39,6 +39,7 @@ The parser also accepts:
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -339,18 +340,29 @@ def extract_covers(test_dir: Path | str) -> list[TestAnnotation]:
             # Never mine coverage annotations from bytecode caches or vendored
             # deps (e.g. a `Covers: AC-1` string inside node_modules).
             continue
-        suffix = path.suffix.lower()
-        if suffix == ".py":
-            results.extend(_extract_from_python_file(path))
-        elif suffix in (".js", ".ts", ".tsx", ".jsx"):
-            results.extend(_extract_from_js_file(path))
-        elif suffix == ".cs":
-            results.extend(_extract_from_csharp_file(path))
-        elif suffix == ".gd":
-            results.extend(_extract_from_gdscript_file(path))
-        elif suffix == ".rs":
-            results.extend(_extract_from_rust_file(path))
+        results.extend(extract_covers_from_file(path))
     return results
+
+
+def extract_covers_from_file(path: Path | str) -> list[TestAnnotation]:
+    """Test annotations of one file, dispatched on its extension."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return _extract_from_python_file(path)
+    if suffix in (".js", ".ts", ".tsx", ".jsx"):
+        return _extract_from_js_file(path)
+    if suffix == ".cs":
+        return _extract_from_csharp_file(path)
+    if suffix == ".gd":
+        return _extract_from_gdscript_file(path)
+    if suffix == ".rs":
+        return _extract_from_rust_file(path)
+    return []
+
+
+def _norm_path(p: str) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
 
 
 def verify_coverage(
@@ -358,6 +370,7 @@ def verify_coverage(
     test_dirs: list[Path | str],
     triage_report: dict | None = None,
     passing_test_names: set[str] | None = None,
+    exclude_files: set[str] | None = None,
 ) -> CoverageResult:
     """Verify that every criterion in the task is covered.
 
@@ -369,6 +382,10 @@ def verify_coverage(
         passing_test_names: Optional set of test names that PASSED in the
             green phase. If provided, coverage requires a PASSING test,
             not just any test with the annotation.
+        exclude_files: Optional test-file paths whose annotations must not
+            count. The green phase passes the files that appeared after the
+            red seal and were judged out of this task's scope, so a file the
+            seal does not protect can never satisfy one of its criteria.
 
     Returns:
         CoverageResult with all_covered flag and detailed breakdown.
@@ -384,6 +401,9 @@ def verify_coverage(
     annotations: list[TestAnnotation] = []
     for td in test_dirs:
         annotations.extend(extract_covers(td))
+    if exclude_files:
+        excluded = {_norm_path(f) for f in exclude_files}
+        annotations = [a for a in annotations if _norm_path(a.test_file) not in excluded]
 
     # Build: AC-N → [list of test names]
     covered_by_tests: dict[str, list[str]] = {}

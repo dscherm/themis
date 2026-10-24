@@ -248,9 +248,11 @@ def test_green_fails_when_new_test_file_added():
 
     An implementing agent could try to add a new test file with only
     passing assertions, hoping to dilute the criterion coverage or
-    paper over a failing test. The hash set comparison should catch
-    this because a new path appears in current_hashes that isn't in
-    red_result.test_file_hashes.
+    paper over a failing test. A new path that isn't in
+    red_result.test_file_hashes AND tags this task's criteria is this
+    task's file, so it breaks the seal. (A new file that tags none of
+    them is another task's -- see test_shared_checkout_seal.py and
+    docs/shared-checkout-seal.md.)
     """
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
