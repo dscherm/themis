@@ -1,5 +1,5 @@
 {
-  "_comment": "Settings for Blind TDD Agent #2 (test runner). Bash is allowed ONLY for test-runner commands (pytest, jest, dotnet test, etc.) — never for cat/grep/find which would bypass Layer 1. Read/Grep/Glob/Write guarded by PreToolUse hook. Write is allowed SO THE RUNNER CAN EMIT ITS MANDATED green_report — the path guard scopes it to green_report/** and the locked-test hash rule denies writing any sealed test file, so this is not a hole. Edit/NotebookEdit stay denied (tests are read-only; the report is a fresh file).",
+  "_comment": "Settings for Blind TDD Agent #2 (test runner). Bash is allowed ONLY for test-runner commands (pytest, jest, dotnet test, etc.) — never for cat/grep/find which would bypass Layer 1. Read/Grep/Glob/Write guarded by PreToolUse hook. Write is allowed SO THE RUNNER CAN EMIT ITS MANDATED green_report — the path guard scopes it to green_report/** and the locked-test hash rule denies writing any sealed test file, so this is not a hole. Edit/NotebookEdit stay denied (tests are read-only; the report is a fresh file). MCP tools (mcp__*) are denied by the path guard while a session is armed: an MCP server is a second filesystem and shell. PowerShell is governed by the shell guard under the same test-runner-only policy as Bash.",
   "permissions": {
     "allow": [
       "Read",
@@ -45,6 +45,24 @@
     "PreToolUse": [
       {
         "matcher": "Read|Grep|Glob|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_path_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_bash_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
         "hooks": [
           {
             "type": "command",
