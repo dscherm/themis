@@ -54,6 +54,31 @@ _COVERS_PATTERN = re.compile(
 )
 _AC_ID_PATTERN = re.compile(r"AC-\d+", re.IGNORECASE)
 
+# A task id: an upper-case letter, then letters/digits, optional '-'/'.' parts.
+_TASK_TOKEN = r"[A-Z][A-Za-z0-9]*(?:[-.][A-Za-z0-9]+)*"
+_TASK_RE = re.compile(_TASK_TOKEN)
+# One tag: `AC-N`, `AC-N (TASK)` or `TASK AC-N`. A TASK that is itself an AC id
+# is not a prefix qualifier.
+_COVERS_ITEM = (
+    r"(?:(?P<pre>(?!(?i:AC)-\d+\b)" + _TASK_TOKEN + r")[ \t]+)?"
+    r"(?P<ac>(?i:AC)-\d+)"
+    r"(?:[ \t]*\((?P<par>[^()\n]*)\))?"
+)
+_COVERS_QUALIFIED_PATTERN = re.compile(
+    r"(?i:Covers)\s*:\s*(?P<body>(?:" + _COVERS_ITEM + r"[\s,]*)+)"
+)
+_COVERS_ITEM_RE = re.compile(_COVERS_ITEM)
+
+
+def _as_task_id(text: str | None) -> str | None:
+    """`text` if it is a well-formed task id (contains a digit), else None."""
+    if text is None:
+        return None
+    text = text.strip()
+    if _TASK_RE.fullmatch(text) and any(ch.isdigit() for ch in text):
+        return text
+    return None
+
 
 @dataclass
 class TestAnnotation:
@@ -62,6 +87,8 @@ class TestAnnotation:
     test_file: str
     covers: list[str] = field(default_factory=list)
     docstring: str = ""
+    covers_tasks: dict[str, list] = field(default_factory=dict)
+    """AC id -> qualifiers seen for it (a task id, or None for an unqualified tag)."""
 
 
 @dataclass
@@ -82,6 +109,12 @@ class CoverageResult:
 
     extra_tests: list[str] = field(default_factory=list)
     """Tests with `Covers: AC-X` annotations where AC-X is not in the task spec."""
+
+    qualified: list[str] = field(default_factory=list)
+    """AC-N values with at least one counted tag qualified with this task's id."""
+
+    ambiguous: list[str] = field(default_factory=list)
+    """AC-N values covered only by unqualified tags (could belong to any task)."""
 
 
 def _parse_covers_from_docstring(docstring: str) -> list[str]:
@@ -104,6 +137,39 @@ def _parse_covers_from_docstring(docstring: str) -> list[str]:
     return unique
 
 
+def parse_covers_qualified(docstring: str) -> list[tuple[str, str | None]]:
+    """Return (AC id upper-cased, task id or None) for each `Covers:` tag.
+
+    `AC-N (TASK)` and `TASK AC-N` are qualified; anything else, including a
+    lower-case word in parentheses, leaves the tag unqualified.
+    """
+    if not isinstance(docstring, str):
+        raise TypeError("docstring must be a str")
+    pairs: list[tuple[str, str | None]] = []
+    for match in _COVERS_QUALIFIED_PATTERN.finditer(docstring):
+        for item in _COVERS_ITEM_RE.finditer(match.group("body")):
+            task = _as_task_id(item.group("pre")) or _as_task_id(item.group("par"))
+            pair = (item.group("ac").upper(), task)
+            if pair not in pairs:
+                pairs.append(pair)
+    return pairs
+
+
+def _add_pairs(ann: TestAnnotation, pairs: list[tuple[str, str | None]]) -> None:
+    for ac, task in pairs:
+        if ac not in ann.covers:
+            ann.covers.append(ac)
+        quals = ann.covers_tasks.setdefault(ac, [])
+        if task not in quals:
+            quals.append(task)
+
+
+def _annotation(name: str, path: Path, pairs, doc: str) -> TestAnnotation:
+    ann = TestAnnotation(test_name=name, test_file=str(path), docstring=doc[:500])
+    _add_pairs(ann, pairs)
+    return ann
+
+
 def _extract_from_python_file(path: Path) -> list[TestAnnotation]:
     """Parse a Python test file and extract test function annotations."""
     results: list[TestAnnotation] = []
@@ -121,12 +187,8 @@ def _extract_from_python_file(path: Path) -> list[TestAnnotation]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_"):
                 docstring = ast.get_docstring(node) or ""
-                covers = _parse_covers_from_docstring(docstring)
-                results.append(TestAnnotation(
-                    test_name=node.name,
-                    test_file=str(path),
-                    covers=covers,
-                    docstring=docstring[:500],
+                results.append(_annotation(
+                    node.name, path, parse_covers_qualified(docstring), docstring,
                 ))
         for child in ast.iter_child_nodes(node):
             _walk(child)
@@ -156,14 +218,9 @@ def _extract_from_js_file(path: Path) -> list[TestAnnotation]:
     )
     for match in pattern.finditer(source):
         comment = match.group("block") or match.group("line") or ""
-        covers = _parse_covers_from_docstring(comment)
-        if covers:
-            results.append(TestAnnotation(
-                test_name=match.group("name"),
-                test_file=str(path),
-                covers=covers,
-                docstring=comment[:500],
-            ))
+        pairs = parse_covers_qualified(comment)
+        if pairs:
+            results.append(_annotation(match.group("name"), path, pairs, comment))
 
     # Also handle standalone `it('test name — Covers: AC-1', () => ...)` style
     inline_pattern = re.compile(
@@ -171,14 +228,9 @@ def _extract_from_js_file(path: Path) -> list[TestAnnotation]:
     )
     for match in inline_pattern.finditer(source):
         name = match.group("name")
-        covers = _parse_covers_from_docstring(name)
-        if covers:
-            results.append(TestAnnotation(
-                test_name=name,
-                test_file=str(path),
-                covers=covers,
-                docstring=name[:500],
-            ))
+        pairs = parse_covers_qualified(name)
+        if pairs:
+            results.append(_annotation(name, path, pairs, name))
 
     return results
 
@@ -203,14 +255,9 @@ def _extract_from_csharp_file(path: Path) -> list[TestAnnotation]:
     )
     for match in pattern.finditer(source):
         comment = match.group("comment")
-        covers = _parse_covers_from_docstring(comment)
-        if covers:
-            results.append(TestAnnotation(
-                test_name=match.group("name"),
-                test_file=str(path),
-                covers=covers,
-                docstring=comment[:500],
-            ))
+        pairs = parse_covers_qualified(comment)
+        if pairs:
+            results.append(_annotation(match.group("name"), path, pairs, comment))
     return results
 
 
@@ -232,7 +279,7 @@ def _extract_from_gdscript_file(path: Path) -> list[TestAnnotation]:
     func_re = re.compile(r"^\s*func\s+(?P<name>_?test\w*)\s*\(", re.IGNORECASE)
     anns: dict[str, TestAnnotation] = {}
     current: str | None = None
-    pending: list[str] = []
+    pending: list[tuple[str, str | None]] = []
 
     def _ensure(name: str) -> TestAnnotation:
         if name not in anns:
@@ -246,21 +293,16 @@ def _extract_from_gdscript_file(path: Path) -> list[TestAnnotation]:
         if m:
             current = m.group("name") or ""
             ann = _ensure(current)
-            for ac in pending:
-                if ac not in ann.covers:
-                    ann.covers.append(ac)
+            _add_pairs(ann, pending)
             pending = []
             continue
-        covers = _parse_covers_from_docstring(line)
-        if not covers:
+        pairs = parse_covers_qualified(line)
+        if not pairs:
             continue
         if current is not None:
-            ann = anns[current]
-            for ac in covers:
-                if ac not in ann.covers:
-                    ann.covers.append(ac)
+            _add_pairs(anns[current], pairs)
         else:
-            pending.extend(covers)
+            pending.extend(pairs)
     return results
 
 
@@ -280,7 +322,7 @@ def _extract_from_rust_file(path: Path) -> list[TestAnnotation]:
     fn_re = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(?P<name>\w+)\s*\(")
     anns: dict[str, TestAnnotation] = {}
     current: str | None = None
-    pending: list[str] = []
+    pending: list[tuple[str, str | None]] = []
     saw_test_attr = False
 
     def _ensure(name: str) -> TestAnnotation:
@@ -301,24 +343,19 @@ def _extract_from_rust_file(path: Path) -> list[TestAnnotation]:
                 name = fm.group("name") or ""
                 current = name
                 ann = _ensure(name)
-                for ac in pending:
-                    if ac not in ann.covers:
-                        ann.covers.append(ac)
+                _add_pairs(ann, pending)
                 pending = []
             else:
                 current = None  # a non-test fn; body covers no longer attach
             saw_test_attr = False
             continue
-        covers = _parse_covers_from_docstring(line)
-        if not covers:
+        pairs = parse_covers_qualified(line)
+        if not pairs:
             continue
         if current is not None:
-            ann = anns[current]
-            for ac in covers:
-                if ac not in ann.covers:
-                    ann.covers.append(ac)
+            _add_pairs(anns[current], pairs)
         else:
-            pending.extend(covers)
+            pending.extend(pairs)
     return results
 
 
@@ -365,6 +402,12 @@ def _norm_path(p: str) -> str:
     return os.path.normcase(os.path.normpath(str(p)))
 
 
+def _plain_test_name(name: str) -> str:
+    """A passing-test name reduced to its function: no `[param]`, no `path::Class::`."""
+    name = name.split("[", 1)[0]
+    return name.rsplit("::", 1)[-1]
+
+
 def verify_coverage(
     task: dict,
     test_dirs: list[Path | str],
@@ -406,11 +449,20 @@ def verify_coverage(
         annotations = [a for a in annotations if _norm_path(a.test_file) not in excluded]
 
     # Build: AC-N → [list of test names]
+    task_id = str(task.get("id", "")).lower()
     covered_by_tests: dict[str, list[str]] = {}
+    qualified_acs: set[str] = set()
     extra_tests: list[str] = []
     for ann in annotations:
         for ac in ann.covers:
             if ac in all_criteria:
+                quals = ann.covers_tasks.get(ac) or [None]
+                counted = [q for q in quals
+                           if q is None or q.lower() == task_id]
+                if not counted:
+                    continue
+                if any(q is not None for q in counted):
+                    qualified_acs.add(ac)
                 covered_by_tests.setdefault(ac, []).append(ann.test_name)
             else:
                 extra_tests.append(f"{ann.test_name} (covers {ac})")
@@ -431,6 +483,10 @@ def verify_coverage(
     # Determine missing and not_passing
     missing: list[str] = []
     not_passing: list[str] = []
+    passing_plain = (
+        {_plain_test_name(n) for n in passing_test_names}
+        if passing_test_names is not None else None
+    )
     for ac in all_criteria:
         if ac in covered_by_triage:
             continue
@@ -440,7 +496,8 @@ def verify_coverage(
             continue
         if passing_test_names is not None:
             # Green phase: at least one test covering this AC must be passing
-            if not any(t in passing_test_names for t in tests_for_ac):
+            if not any(t in passing_test_names or t in passing_plain
+                       for t in tests_for_ac):
                 not_passing.append(ac)
 
     all_covered = not missing and not not_passing
@@ -452,6 +509,10 @@ def verify_coverage(
         missing=missing,
         not_passing=not_passing,
         extra_tests=extra_tests,
+        qualified=[ac for ac in all_criteria
+                   if ac in qualified_acs and ac not in missing],
+        ambiguous=[ac for ac in all_criteria
+                   if ac in covered_by_tests and ac not in qualified_acs],
     )
 
 
