@@ -626,6 +626,33 @@ def test_each_role_can_write_its_mandated_output():
             )
 
 
+def test_each_role_reads_only_its_own_pending_brief():
+    """ManualSpawner stages pending/<role>-<task>.md; the role must be able to
+    read ITS brief (its instructions) and no other role's."""
+    from blind_tdd.session import default_allowed_paths, default_blocked_paths
+
+    roles = ["test_writer", "test_runner", "arbiter"]
+    for role in roles:
+        session = {
+            "session_id": f"brief-{role}", "agent_role": role, "task_id": "t1",
+            "allowed_paths": default_allowed_paths(role),
+            "blocked_paths": default_blocked_paths(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _write_session(cwd, session)
+            for other in roles:
+                rc, _, err = _run_hook(cwd=cwd, input_json={
+                    "tool_name": "Read",
+                    "tool_input": {"file_path":
+                                   f".themis/blind_tdd/pending/{other}-t1.md"},
+                })
+                if other == role:
+                    assert rc == 0, f"{role} denied its own brief: {err}"
+                else:
+                    assert rc == 2, f"{role} allowed to read {other}'s brief"
+
+
 def _run_all() -> int:
     tests = [v for k, v in globals().items()
              if callable(v) and k.startswith("test_")]
