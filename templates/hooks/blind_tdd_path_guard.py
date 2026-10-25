@@ -303,17 +303,44 @@ def _in_scope(raw: str, scope: Path | None) -> bool:
     return True
 
 
+def _relative_to_root(raw: str) -> str | None:
+    """Collapse `.`/`..` in a relative path against the repo root.
+
+    Returns the repo-relative POSIX form, or None when the collapsed path lands
+    outside the root. Purely lexical (`os.path.normpath`): matching must see
+    `tests/../src/x.py` as `src/x.py`, and `Path.resolve()` is not used because
+    it follows symlinks the pattern list never named.
+    """
+    root = os.path.normpath(str(_repo_root()))
+    joined = os.path.normpath(os.path.join(root, raw))
+    try:
+        rel = Path(joined).relative_to(root)
+    except ValueError:
+        return None
+    return str(PurePosixPath(*rel.parts))
+
+
+def _escapes_root(raw: str) -> bool:
+    """True for a relative path that collapses to somewhere outside the root."""
+    if not raw or Path(raw).is_absolute():
+        return False
+    return _relative_to_root(raw) is None
+
+
 def _normalize_path(raw: str) -> str:
     """Normalize a path to a repo-relative POSIX form for pattern matching."""
     if not raw:
         return ""
     p = Path(raw)
-    # Resolve relative to CWD if relative
+    if not p.is_absolute():
+        rel_str = _relative_to_root(raw)
+        if rel_str is not None:
+            return rel_str
+        # Escapes the root: keep the collapsed form, `_decide` denies it.
+        return str(PurePosixPath(os.path.normpath(os.path.join(
+            str(_repo_root()), raw)).replace("\\", "/")))
     try:
-        if p.is_absolute():
-            rel = p.resolve().relative_to(_repo_root().resolve())
-        else:
-            rel = p
+        rel = p.resolve().relative_to(_repo_root().resolve())
     except ValueError:
         # Path is outside the repo — treat as absolute, use as-is
         return str(PurePosixPath(*p.parts))
@@ -731,6 +758,14 @@ def _decide(tool_name: str, tool_input: dict, session: dict) -> int:
         return 0
 
     allowed, reason = _check_path(path_norm, session)
+
+    # A relative path that collapses to somewhere outside the root cannot be
+    # judged by patterns written for in-repo paths, so `../x` must not slip
+    # past them by being unmatched. Deny whenever the session restricts anything.
+    if allowed and _escapes_root(path_raw) and (
+            session.get("blocked_paths") or session.get("allowed_paths")):
+        allowed = False
+        reason = "relative path escapes the project root"
 
     # TD140 AC-4: a Grep scoped to an allowed directory must not return lines
     # out of the blocked files inside it. See `_grep_leak_sources`.
