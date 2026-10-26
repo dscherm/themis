@@ -1,5 +1,5 @@
 {
-  "_comment": "Settings for Blind TDD Agent #3 (arbiter). Ruling-only agent. Read-only access to task spec, public_api.md, the specific disputed test, and the challenge text. No Bash, no Edit. Write is allowed SO THE ARBITER CAN EMIT ITS MANDATED ruling — the path guard scopes it to rulings/** and denies writing any sealed test file. Edit/NotebookEdit stay denied.",
+  "_comment": "Settings for Blind TDD Agent #3 (arbiter). Ruling-only agent. Read-only access to task spec, public_api.md, the specific disputed test, and the challenge text. No Bash, no Edit. Write is allowed SO THE ARBITER CAN EMIT ITS MANDATED ruling — the path guard scopes it to rulings/** and denies writing any sealed test file. Edit/NotebookEdit stay denied. MCP tools (mcp__*) are denied by the path guard while a session is armed: an MCP server is a second filesystem and shell. PowerShell is denied alongside Bash.",
   "permissions": {
     "allow": [
       "Read",
@@ -10,6 +10,7 @@
     ],
     "deny": [
       "Bash",
+      "PowerShell",
       "Edit",
       "NotebookEdit"
     ]
@@ -18,6 +19,15 @@
     "PreToolUse": [
       {
         "matcher": "Read|Grep|Glob|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_path_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
         "hooks": [
           {
             "type": "command",

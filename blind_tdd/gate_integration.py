@@ -225,6 +225,29 @@ def _find_task_in_plan(task_id: str) -> dict | None:
     return None
 
 
+def _all_task_ids_in_plan() -> list[str]:
+    """Every task id in plan.md / fix_plan.md JSON blocks, in file order."""
+    ids: list[str] = []
+    for plan_path in ("plan.md", "fix_plan.md"):
+        p = Path(plan_path)
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for block in _extract_json_blocks(text):
+            try:
+                obj = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            for task in _iter_tasks(obj):
+                tid = str(task.get("id", "") or "")
+                if tid and tid not in ids:
+                    ids.append(tid)
+    return ids
+
+
 def _find_first_incomplete_task() -> dict | None:
     """Return the first task in plan.md with `passes: false`."""
     for plan_path in ("plan.md", "fix_plan.md"):
@@ -1343,6 +1366,8 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
     orch, orch_error = _construct_orchestrator(config, btd_cfg, task_id)
     if orch_error is not None:
         return orch_error
+    # Lets the seal check attribute a new test file to the task it names.
+    orch.known_task_ids = _all_task_ids_in_plan()
     try:
         green = orch.run_green_phase(task, red_result)
     except Exception as e:
@@ -1412,23 +1437,81 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
         if qr_result is not None:
             return qr_result
 
+    out_of_scope = dict(getattr(green, "out_of_scope_files", {}) or {})
+    out_of_scope_note = (
+        f" {len(out_of_scope)} test file(s) appeared after the seal and were "
+        f"judged another task's — not sealed, not counted toward coverage: "
+        f"{sorted(out_of_scope)[:5]}."
+        if out_of_scope else ""
+    )
     return BlindGateResult(
         passed=True, phase="green",
         message=(
             f"green phase passed for task {task_id!r}: "
             f"{green.green_report.get('tests_passed', 0)} test(s) passing, "
             f"coverage verified." + ruling_note + suppression_warning
+            + out_of_scope_note
         ),
         task_id=task_id,
         details={
             "tests_passed": green.green_report.get("tests_passed"),
             "tests_failed": green.green_report.get("tests_failed"),
             "hash_match": True,
+            "out_of_scope_files": out_of_scope,
             **ruling_details,
             **escalation_details,
             **suppression_details,
         },
     )
+
+
+def _task_own_test_files(task_id: str, test_dirs: list[str]) -> list[Path]:
+    """The test files that belong to `task_id`: those the green report's
+    per_test entries and the triage file name, plus any test whose module
+    docstring carries a `Bead: <task_id>` line. Empty when none is found.
+    """
+    from .orchestrator import _bead_of
+    base = Path(".themis") / "blind_tdd"
+    named: list[str] = []
+
+    def _read(path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    green = _read(base / "green_report" / f"{task_id}.json")
+    for e in green.get("per_test") or []:
+        if isinstance(e, dict) and isinstance(e.get("file"), str):
+            named.append(e["file"])
+
+    triage = _read(base / "triage" / f"{task_id}.json")
+    hashes = triage.get("writer_hash_test_files")
+    if isinstance(hashes, dict):
+        named.extend(k for k in hashes if isinstance(k, str))
+    for key in ("test_files", "tests"):
+        for e in triage.get(key) or []:
+            if isinstance(e, str):
+                named.append(e)
+            elif isinstance(e, dict):
+                for fk in ("file", "path"):
+                    if isinstance(e.get(fk), str):
+                        named.append(e[fk])
+
+    found: dict[str, Path] = {}
+    for n in named:
+        p = Path(n)
+        if p.suffix == ".py" and p.is_file() and not is_artifact_path(p):
+            found.setdefault(p.resolve().as_posix(), p)
+    for td in test_dirs:
+        d = Path(td)
+        if not d.is_dir():
+            continue
+        for p in d.rglob("test_*.py"):
+            if p.is_file() and not is_artifact_path(p) and _bead_of(str(p)) == task_id:
+                found.setdefault(p.resolve().as_posix(), p)
+    return list(found.values())
 
 
 def _run_quality_review_phase(
@@ -1453,17 +1536,16 @@ def _run_quality_review_phase(
     else:
         prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "quality-reviewer.md"
 
-    # Enumerate test files from the configured test_dirs. Cheaper than
-    # threading test_file_hashes through from the green phase, and equivalent
-    # since the green runner just verified the full set.
-    test_files: list[Path] = []
-    for td in test_dirs:
-        d = Path(td)
-        if d.is_dir():
-            test_files.extend(
-                p for p in d.rglob("test_*.py")
-                if p.is_file() and not is_artifact_path(p)
-            )
+    test_files = _task_own_test_files(task_id, test_dirs)
+    fell_back = not test_files
+    if fell_back:
+        for td in test_dirs:
+            d = Path(td)
+            if d.is_dir():
+                test_files.extend(
+                    p for p in d.rglob("test_*.py")
+                    if p.is_file() and not is_artifact_path(p)
+                )
     public_module = (task.get("public_surface") or {}).get("module")
     src_files: list[Path] = []
     if public_module:
@@ -1480,7 +1562,10 @@ def _run_quality_review_phase(
             pass
         return None  # caller returns normal green pass
 
-    scan_result = qr.scan(task_id, test_files, src_files, public_module=public_module)
+    scan_result = qr.scan(
+        task_id, test_files, src_files, public_module=public_module,
+        fell_back=fell_back,
+    )
 
     # Scanner found nothing — auto-complete with a clean review.
     if scan_result.is_clean():
@@ -1520,4 +1605,7 @@ def _summarize_green(green: GreenPhaseResult) -> dict:
         "tests_passed": rep.get("tests_passed"),
         "tests_failed": rep.get("tests_failed"),
         "overall": rep.get("overall"),
+        # New test files that appeared after the seal and belong to another
+        # task (docs/shared-checkout-seal.md). Not sealed, not counted.
+        "out_of_scope_files": dict(getattr(green, "out_of_scope_files", {}) or {}),
     }

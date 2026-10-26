@@ -1,5 +1,5 @@
 {
-  "_comment": "Settings for Blind TDD Agent #1 (test writer). No Bash tool. Read/Grep/Glob/Edit/Write guarded by PreToolUse hook against .themis/blind_tdd/active_session.json. All tool calls audited via PostToolUse hook.",
+  "_comment": "Settings for Blind TDD Agent #1 (test writer). No Bash tool. Read/Grep/Glob/Edit/Write guarded by PreToolUse hook against .themis/blind_tdd/active_session.json. All tool calls audited via PostToolUse hook. MCP tools (mcp__*) are denied by the path guard while a session is armed: an MCP server is a second filesystem and shell. PowerShell is denied alongside Bash.",
   "permissions": {
     "allow": [
       "Read",
@@ -10,13 +10,23 @@
       "WebFetch"
     ],
     "deny": [
-      "Bash"
+      "Bash",
+      "PowerShell"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Read|Grep|Glob|Edit|Write|NotebookEdit|NotebookRead",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/blind_tdd_path_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
         "hooks": [
           {
             "type": "command",

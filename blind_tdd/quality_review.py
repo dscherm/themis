@@ -38,6 +38,8 @@ class QualityCandidate:
     detail: str        # short human-readable description
     question: str      # suggested AskUserQuestion phrasing
     evidence: str      # short code snippet
+    function: str = ""  # test function name (or "(decorator)" / "(src)")
+    file: str = ""      # project-relative path, "/" separators
 
 
 @dataclass
@@ -46,6 +48,7 @@ class QualityReviewScan:
     candidates: list[QualityCandidate] = field(default_factory=list)
     test_files_scanned: list[str] = field(default_factory=list)
     src_files_scanned: list[str] = field(default_factory=list)
+    fell_back: bool = False
 
     def is_clean(self) -> bool:
         return not self.candidates
@@ -207,6 +210,27 @@ def _scan_src_for_escape_hatches(path: Path) -> list[QualityCandidate]:
     return candidates
 
 
+def _project_relative(path: Path) -> str:
+    p = Path(path)
+    if p.is_absolute():
+        try:
+            p = p.resolve().relative_to(Path.cwd().resolve())
+        except (ValueError, OSError):
+            pass
+    return p.as_posix()
+
+
+def _split_location(location: str) -> str:
+    return location.rsplit(":", 1)[0] if re.search(r":\d+$", location) else location
+
+
+def _fill_function_and_file(c: QualityCandidate) -> None:
+    if not c.function:
+        c.function = c.test_name or "(unknown)"
+    if not c.file:
+        c.file = _project_relative(Path(_split_location(c.location)))
+
+
 # ---------------------------------------------------------------------------
 # Top-level scan entry point
 # ---------------------------------------------------------------------------
@@ -216,6 +240,7 @@ def scan(
     test_files: list[Path],
     src_files: list[Path],
     public_module: str | None = None,
+    fell_back: bool = False,
 ) -> QualityReviewScan:
     """Produce quality candidates for the interview loop.
 
@@ -226,7 +251,7 @@ def scan(
         public_module: `public_surface.module` from the task spec (used for
             mock-shadows-uut detection); None to skip that check
     """
-    scan_result = QualityReviewScan(task_id=task_id)
+    scan_result = QualityReviewScan(task_id=task_id, fell_back=fell_back)
     for tf in test_files:
         scan_result.test_files_scanned.append(str(tf))
         try:
@@ -241,6 +266,8 @@ def scan(
     for sf in src_files:
         scan_result.src_files_scanned.append(str(sf))
         scan_result.candidates.extend(_scan_src_for_escape_hatches(sf))
+    for c in scan_result.candidates:
+        _fill_function_and_file(c)
     return scan_result
 
 
@@ -261,11 +288,21 @@ def write_pending_brief(scan_result: QualityReviewScan, prompt_path: Path) -> Pa
         except OSError:
             prompt_text = ""
 
+    scanned = ", ".join(f"`{_project_relative(Path(t))}`" for t in scan_result.test_files_scanned)
+    if scan_result.fell_back:
+        scope_line = (
+            "**Scope.** No green report, triage file or `Bead:` line names this "
+            f"task's tests, so this review fell back to all test_dirs: {scanned}."
+        )
+    else:
+        scope_line = f"**Scope.** This task's own test files: {scanned}."
     lines = [
         f"# Blind TDD Quality Review — `{scan_result.task_id}`",
         "",
         f"Staged {datetime.now(timezone.utc).isoformat()}. "
         f"{len(scan_result.candidates)} candidate(s) for human judgment.",
+        "",
+        scope_line,
         "",
         "## Instructions",
         "",

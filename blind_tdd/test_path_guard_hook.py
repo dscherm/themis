@@ -331,6 +331,53 @@ def test_path_outside_repo_treated_as_absolute():
 
 
 # ---------------------------------------------------------------------------
+# Relative-path collapsing (TPL-1)
+# ---------------------------------------------------------------------------
+
+def _read_rc(file_path: str, session: dict = WRITER_SESSION) -> int:
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td).resolve()
+        _write_session(cwd, session)
+        rc, _, _ = _run_hook(cwd=cwd, input_json={
+            "tool_name": "Read", "tool_input": {"file_path": file_path},
+        })
+        return rc
+
+
+def test_dotdot_into_blocked_src_denied():
+    assert _read_rc("tests/../src/x.py") == 2
+
+
+def test_dot_prefix_blocked_src_denied():
+    assert _read_rc("./src/x.py") == 2
+
+
+def test_dotdot_inside_allowed_tree_allowed():
+    assert _read_rc("tests/./a/../b.py") == 0
+
+
+def test_relative_escape_denied_while_armed():
+    assert _read_rc("../outside.txt") == 2
+    assert _read_rc("tests/../../outside.txt") == 2
+
+
+def test_relative_escape_denied_in_blacklist_only_session():
+    blacklist = dict(WRITER_SESSION, allowed_paths=[])
+    assert _read_rc("../outside.txt", blacklist) == 2
+    assert _read_rc("tests/../src/x.py", blacklist) == 2
+    assert _read_rc("tests/ok.py", blacklist) == 0
+
+
+def test_relative_escape_allowed_without_session():
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td).resolve()
+        rc, _, _ = _run_hook(cwd=cwd, input_json={
+            "tool_name": "Read", "tool_input": {"file_path": "../outside.txt"},
+        })
+        assert rc == 0
+
+
+# ---------------------------------------------------------------------------
 # Audit log writes
 # ---------------------------------------------------------------------------
 

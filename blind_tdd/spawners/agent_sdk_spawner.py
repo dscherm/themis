@@ -252,8 +252,13 @@ class AgentSdkSpawner:
         """
         hook_dir = self.themis_home / "templates" / "hooks"
         path_guard = str(hook_dir / "blind_tdd_path_guard.py")
+        bash_guard = str(hook_dir / "blind_tdd_bash_guard.py")
         audit = str(hook_dir / "blind_tdd_audit.py")
         py = sys.executable
+        # A guard sees only the tools its matcher names. The shell guard must
+        # cover PowerShell as well as Bash, and the path guard must see every
+        # mcp__* tool (it denies them all while a session is armed): an MCP
+        # server is a second filesystem and shell the file matchers never see.
         return {
             "PreToolUse": [
                 {
@@ -261,7 +266,19 @@ class AgentSdkSpawner:
                     "hooks": [
                         {"type": "command", "command": f"{py} {path_guard}"}
                     ],
-                }
+                },
+                {
+                    "matcher": "Bash|PowerShell",
+                    "hooks": [
+                        {"type": "command", "command": f"{py} {bash_guard}"}
+                    ],
+                },
+                {
+                    "matcher": "mcp__.*",
+                    "hooks": [
+                        {"type": "command", "command": f"{py} {path_guard}"}
+                    ],
+                },
             ],
             "PostToolUse": [
                 {

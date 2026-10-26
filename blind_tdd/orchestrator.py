@@ -56,7 +56,7 @@ from typing import Callable, Protocol
 from xml.etree import ElementTree
 
 from .artifacts import is_artifact_path
-from .coverage import verify_coverage, CoverageResult
+from .coverage import extract_covers_from_file, verify_coverage, CoverageResult
 from .roots import _LANG_EXTENSIONS
 from .schema_validator import validate_task, ValidationResult
 from .session import (
@@ -379,11 +379,124 @@ def _task_id_pattern(task_id: str) -> re.Pattern[str]:
     """Match `task_id` as a whole token, so TD1 does not match TD110.
 
     Neither side may be an adjacent alphanumeric: `test_td10_export.py`
-    matches TD10, `test_td110_library.py` does not.
+    matches TD10, `test_td110_library.py` does not. The id's own separators
+    (`-`, `.`, `_`) match an optional `-`, `_` or nothing, so COV-1 matches
+    `test_cov1_x.py`, `test_cov-1_x.py` and `test_cov_1_x.py` but not cov12.
     """
-    return re.compile(
-        rf"(?<![0-9a-z]){re.escape(task_id.lower())}(?![0-9a-z])"
-    )
+    parts = [p for p in re.split(r"[-._]+", task_id.lower()) if p]
+    body = "[-_]?".join(re.escape(p) for p in parts) if parts else re.escape(task_id.lower())
+    return re.compile(rf"(?<![0-9a-z]){body}(?![0-9a-z])")
+
+
+_BEAD_LINE = re.compile(r"^[ 	]*Bead:[ 	]*([A-Za-z0-9][A-Za-z0-9._-]*)", re.MULTILINE)
+
+
+def _bead_of(path: str) -> str | None:
+    """The id on a `Bead: <id>` line of a Python file's module docstring."""
+    if not str(path).lower().endswith(".py"):
+        return None
+    try:
+        import ast
+        doc = ast.get_docstring(ast.parse(Path(path).read_text(encoding="utf-8")))
+    except (SyntaxError, ValueError, OSError):
+        return None
+    m = _BEAD_LINE.search(doc or "")
+    return m.group(1) if m else None
+
+
+@dataclass
+class SealDiff:
+    """How the test tree differs from the red seal, split by whose problem it is.
+
+    `broken` fails the green check: a sealed file that was modified or deleted,
+    or a new file that belongs to this task. `out_of_scope` is a new file that
+    belongs to nobody we can prove is this task -- typically another task's
+    test merged into a shared checkout during the implementation window. It is
+    reported, never sealed, and excluded from this task's coverage count.
+    See docs/shared-checkout-seal.md.
+    """
+
+    broken: dict[str, str] = field(default_factory=dict)
+    out_of_scope: dict[str, str] = field(default_factory=dict)
+
+
+def _classify_seal_diff(
+    sealed: dict[str, str],
+    current: dict[str, str],
+    *,
+    task: dict,
+    known_task_ids: list[str] | tuple[str, ...] = (),
+) -> SealDiff:
+    """Compare a red seal against the tree now; map each differing path to why."""
+    diff = SealDiff()
+    for path in sorted(set(sealed) | set(current)):
+        before, after = sealed.get(path), current.get(path)
+        if before == after:
+            continue
+        if before is not None:
+            diff.broken[path] = "deleted" if after is None else "modified"
+            continue
+        verdict = _new_file_scope(path, task=task, known_task_ids=known_task_ids)
+        if verdict.startswith("out of scope"):
+            diff.out_of_scope[path] = verdict
+        else:
+            diff.broken[path] = verdict
+    return diff
+
+
+def _new_file_scope(path: str, *, task: dict, known_task_ids) -> str:
+    """Decide whether a test file that appeared after the seal is this task's.
+
+    In scope (returned reason does not start with "out of scope"):
+      - a `conftest.py`: it reaches every sealed test in its directory, so it
+        can change what they assert without touching their bytes;
+      - a file whose name names this task;
+      - a file tagging one of this task's criteria with `Covers:`, unless its
+        name names a different known task and not this one -- AC ids are
+        per-task (every task has an AC-1), so the tag alone cannot tell this
+        task's sneaked test from another task's blind test.
+    """
+    task_id = str(task.get("id", "") or "")
+    name = Path(path).name.lower()
+    if name == "conftest.py":
+        return "new conftest.py (reaches every sealed test in its directory)"
+    bead = _bead_of(path)
+    if bead:
+        if task_id and bead.lower() == task_id.lower():
+            return f"new file declaring `Bead: {bead}`"
+        return f"out of scope: Bead: {bead}"
+    if task_id and _task_id_pattern(task_id).search(name):
+        return f"new file named for {task_id}"
+
+    criteria = {
+        str(c["id"]).upper()
+        for c in (task.get("acceptance_criteria") or [])
+        if isinstance(c, dict) and c.get("id")
+    }
+    annotations = extract_covers_from_file(path)
+    tagged = sorted({ac for ann in annotations for ac in ann.covers} & criteria)
+    if tagged:
+        quals: set = set()
+        for ann in annotations:
+            for ac, qs in ann.covers_tasks.items():
+                if ac.upper() in criteria:
+                    quals.update(None if q is None else str(q).lower() for q in (qs or [None]))
+        if quals and None not in quals and task_id.lower() not in quals:
+            return (
+                f"out of scope: `Covers:` {', '.join(tagged)} qualified for "
+                f"{', '.join(sorted(quals))}"
+            )
+        others = [
+            t for t in known_task_ids
+            if t and t != task_id and _task_id_pattern(str(t)).search(name)
+        ]
+        if not others:
+            return f"new file tagging this task's {', '.join(tagged)}"
+        return (
+            f"out of scope: named for {others[0]}; its `Covers:` "
+            f"{', '.join(tagged)} are that task's criteria"
+        )
+    return "out of scope: new file that tags none of this task's criteria"
 
 
 def _audit_sessions_for(
@@ -1157,6 +1270,9 @@ class GreenPhaseResult:
     # test file — hash_match alone can't distinguish tampering from a spawn
     # failure that never got as far as hashing.
     hash_break: bool = False
+    # New test files that appeared after the seal and were judged another
+    # task's: path -> reason. Reported, not sealed, excluded from coverage.
+    out_of_scope_files: dict[str, str] = field(default_factory=dict)
     coverage: CoverageResult | None = None
     violations: list[dict] = field(default_factory=list)
     spawn_result: dict = field(default_factory=dict)
@@ -1193,6 +1309,10 @@ class BlindTddOrchestrator:
         # directories instead of a JS-shaped guess.
         self.blocked_paths = blocked_paths
         self.sealed_roots_meta = sealed_roots_meta or {}
+        # Every task id the caller knows of (the gate reads them from
+        # plan.md). Only used to attribute a new test file to another task;
+        # empty means a new file tagging this task's criteria always breaks.
+        self.known_task_ids: list[str] = []
 
     # ------------------------------------------------------------------
     # Validation
@@ -1468,17 +1588,18 @@ class BlindTddOrchestrator:
                 violations=violations,
             )
 
-        # Verify test file hashes match the red phase
+        # Verify test file hashes match the red phase. Every sealed file must
+        # be byte-identical; a NEW file only breaks the seal if it is this
+        # task's (docs/shared-checkout-seal.md) -- in a checkout several
+        # sessions merge into, other tasks' tests land mid-window.
         current_hashes = _hash_test_files([Path(d) for d in self.test_dirs])
-        hash_match = current_hashes == red_result.test_file_hashes
-        if not hash_match:
-            modified = sorted(
-                set(red_result.test_file_hashes.keys())
-                | set(current_hashes.keys())
-            )
+        seal_diff = _classify_seal_diff(
+            red_result.test_file_hashes, current_hashes,
+            task=task, known_task_ids=self.known_task_ids,
+        )
+        if seal_diff.broken:
             mismatched = [
-                f for f in modified
-                if current_hashes.get(f) != red_result.test_file_hashes.get(f)
+                f"{f} ({why})" for f, why in seal_diff.broken.items()
             ]
             return GreenPhaseResult(
                 passed=False,
@@ -1490,6 +1611,7 @@ class BlindTddOrchestrator:
                 hash_match=False,
                 hash_break=True,
                 rulings_applied=list(red_result.rulings_applied),
+                out_of_scope_files=seal_diff.out_of_scope,
                 spawn_result=spawn_result,
                 violations=violations,
             )
@@ -1507,6 +1629,7 @@ class BlindTddOrchestrator:
             self.test_dirs,
             triage_report=red_result.triage_report,
             passing_test_names=passing_names,
+            exclude_files=set(seal_diff.out_of_scope),
         )
 
         if not coverage.all_covered:
@@ -1519,6 +1642,7 @@ class BlindTddOrchestrator:
                 ),
                 green_report=green_report,
                 hash_match=True,
+                out_of_scope_files=seal_diff.out_of_scope,
                 coverage=coverage,
                 spawn_result=spawn_result,
                 violations=violations,
@@ -1543,6 +1667,7 @@ class BlindTddOrchestrator:
                 ),
                 green_report=green_report,
                 hash_match=True,
+                out_of_scope_files=seal_diff.out_of_scope,
                 coverage=coverage,
                 spawn_result=spawn_result,
                 violations=violations,
@@ -1564,6 +1689,7 @@ class BlindTddOrchestrator:
                 ),
                 green_report=green_report,
                 hash_match=True,
+                out_of_scope_files=seal_diff.out_of_scope,
                 coverage=coverage,
                 spawn_result=spawn_result,
                 violations=violations,
@@ -1576,6 +1702,7 @@ class BlindTddOrchestrator:
                 reason=f"runner reported overall={green_report.get('overall')}",
                 green_report=green_report,
                 hash_match=True,
+                out_of_scope_files=seal_diff.out_of_scope,
                 coverage=coverage,
                 spawn_result=spawn_result,
             )
@@ -1599,6 +1726,7 @@ class BlindTddOrchestrator:
             reason="green phase passed",
             green_report=green_report,
             hash_match=True,
+            out_of_scope_files=seal_diff.out_of_scope,
             rulings_applied=list(red_result.rulings_applied),
             coverage=coverage,
             spawn_result=spawn_result,

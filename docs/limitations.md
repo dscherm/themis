@@ -171,6 +171,14 @@ like any other change, and with `THEMIS_SEAL_KEY` set the pending/applied
 records ride under the same HMAC as the baseline, so a key-less implementer
 cannot forge an "upheld" entry to license its own edit.
 
+A *new* test file that appears after the seal breaks it only if it is this
+task's: named for the task, tagging one of its criteria (unless named for
+another plan.md task), or a `conftest.py`. Any other new file — typically
+another task's test merged into a shared checkout — is reported, left unsealed,
+and excluded from this task's coverage. Such a file is still collected by the
+runner, so import-time side effects from it are not defended
+([`docs/shared-checkout-seal.md`](shared-checkout-seal.md)).
+
 ## Results are per-model snapshots
 
 The prompts, the blindness-compliance behavior, and the measured cheat rates are
