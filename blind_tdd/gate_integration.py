@@ -1465,6 +1465,55 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
     )
 
 
+def _task_own_test_files(task_id: str, test_dirs: list[str]) -> list[Path]:
+    """The test files that belong to `task_id`: those the green report's
+    per_test entries and the triage file name, plus any test whose module
+    docstring carries a `Bead: <task_id>` line. Empty when none is found.
+    """
+    from .orchestrator import _bead_of
+    base = Path(".themis") / "blind_tdd"
+    named: list[str] = []
+
+    def _read(path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    green = _read(base / "green_report" / f"{task_id}.json")
+    for e in green.get("per_test") or []:
+        if isinstance(e, dict) and isinstance(e.get("file"), str):
+            named.append(e["file"])
+
+    triage = _read(base / "triage" / f"{task_id}.json")
+    hashes = triage.get("writer_hash_test_files")
+    if isinstance(hashes, dict):
+        named.extend(k for k in hashes if isinstance(k, str))
+    for key in ("test_files", "tests"):
+        for e in triage.get(key) or []:
+            if isinstance(e, str):
+                named.append(e)
+            elif isinstance(e, dict):
+                for fk in ("file", "path"):
+                    if isinstance(e.get(fk), str):
+                        named.append(e[fk])
+
+    found: dict[str, Path] = {}
+    for n in named:
+        p = Path(n)
+        if p.suffix == ".py" and p.is_file() and not is_artifact_path(p):
+            found.setdefault(p.resolve().as_posix(), p)
+    for td in test_dirs:
+        d = Path(td)
+        if not d.is_dir():
+            continue
+        for p in d.rglob("test_*.py"):
+            if p.is_file() and not is_artifact_path(p) and _bead_of(str(p)) == task_id:
+                found.setdefault(p.resolve().as_posix(), p)
+    return list(found.values())
+
+
 def _run_quality_review_phase(
     task: dict,
     task_id: str,
@@ -1487,17 +1536,16 @@ def _run_quality_review_phase(
     else:
         prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "quality-reviewer.md"
 
-    # Enumerate test files from the configured test_dirs. Cheaper than
-    # threading test_file_hashes through from the green phase, and equivalent
-    # since the green runner just verified the full set.
-    test_files: list[Path] = []
-    for td in test_dirs:
-        d = Path(td)
-        if d.is_dir():
-            test_files.extend(
-                p for p in d.rglob("test_*.py")
-                if p.is_file() and not is_artifact_path(p)
-            )
+    test_files = _task_own_test_files(task_id, test_dirs)
+    fell_back = not test_files
+    if fell_back:
+        for td in test_dirs:
+            d = Path(td)
+            if d.is_dir():
+                test_files.extend(
+                    p for p in d.rglob("test_*.py")
+                    if p.is_file() and not is_artifact_path(p)
+                )
     public_module = (task.get("public_surface") or {}).get("module")
     src_files: list[Path] = []
     if public_module:
@@ -1514,7 +1562,10 @@ def _run_quality_review_phase(
             pass
         return None  # caller returns normal green pass
 
-    scan_result = qr.scan(task_id, test_files, src_files, public_module=public_module)
+    scan_result = qr.scan(
+        task_id, test_files, src_files, public_module=public_module,
+        fell_back=fell_back,
+    )
 
     # Scanner found nothing — auto-complete with a clean review.
     if scan_result.is_clean():
