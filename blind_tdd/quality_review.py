@@ -49,9 +49,12 @@ class QualityReviewScan:
     test_files_scanned: list[str] = field(default_factory=list)
     src_files_scanned: list[str] = field(default_factory=list)
     fell_back: bool = False
+    # Test files whose language has no quality scanner. Not scanned is not
+    # clean: these keep the review from auto-passing.
+    not_scanned: list[str] = field(default_factory=list)
 
     def is_clean(self) -> bool:
-        return not self.candidates
+        return not self.candidates and not self.not_scanned
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +185,11 @@ _SRC_ESCAPE_HATCH_PATTERNS = [
     (r'\bsettings\.TESTING\b', "settings.TESTING (Django)"),
     (r'\bapp\.config\[[\'"]TESTING[\'"]\]', "app.config TESTING (Flask)"),
     (r'\bprocess\.env\.NODE_ENV\s*===?\s*["\']test["\']', "NODE_ENV === 'test'"),
+    # GDScript (Godot)
+    (r'\bOS\.has_feature\s*\(\s*["\']test', 'OS.has_feature("test")'),
+    (r'\bOS\.get_environment\s*\(\s*["\']TESTING?["\']', "OS.get_environment TESTING"),
+    (r'get_cmdline(?:_user)?_args\s*\(\s*\).*["\']--?test', "--test command-line flag"),
+    (r'\bGutTest\b|res://addons/gut/', "GUT referenced from source"),
 ]
 
 
@@ -251,8 +259,19 @@ def scan(
         public_module: `public_surface.module` from the task spec (used for
             mock-shadows-uut detection); None to skip that check
     """
+    from .lang import GDSCRIPT, PYTHON, language_for
+
     scan_result = QualityReviewScan(task_id=task_id, fell_back=fell_back)
     for tf in test_files:
+        lang = language_for(tf)
+        if lang is GDSCRIPT:
+            from .quality_gd import scan_test_file
+            scan_result.test_files_scanned.append(str(tf))
+            scan_result.candidates.extend(scan_test_file(Path(tf), public_module))
+            continue
+        if lang is not PYTHON:
+            scan_result.not_scanned.append(str(tf))
+            continue
         scan_result.test_files_scanned.append(str(tf))
         try:
             tree = ast.parse(tf.read_text(encoding="utf-8"))
@@ -261,7 +280,7 @@ def scan(
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 scan_result.candidates.extend(_scan_test_function(tf, node))
-        if public_module:
+        if public_module and not public_module.lower().endswith(".gd"):
             scan_result.candidates.extend(_mocks_shadowing_uut(tf, public_module))
     for sf in src_files:
         scan_result.src_files_scanned.append(str(sf))
@@ -304,6 +323,16 @@ def write_pending_brief(scan_result: QualityReviewScan, prompt_path: Path) -> Pa
         "",
         scope_line,
         "",
+    ]
+    if scan_result.not_scanned:
+        lines.extend([
+            "**Not scanned.** No quality scanner reads these files' language, so "
+            "the candidates below say nothing about them. Review them by hand: "
+            + ", ".join(f"`{_project_relative(Path(t))}`" for t in scan_result.not_scanned)
+            + ".",
+            "",
+        ])
+    lines += [
         "## Instructions",
         "",
         prompt_text or "(quality-reviewer prompt not found; follow the pattern in prompts/deep-interview.md)",
@@ -341,7 +370,8 @@ def write_pending_brief(scan_result: QualityReviewScan, prompt_path: Path) -> Pa
         "```json",
         json.dumps(
             {"task_id": scan_result.task_id,
-             "candidates": [asdict(c) for c in scan_result.candidates]},
+             "candidates": [asdict(c) for c in scan_result.candidates],
+             "not_scanned": [_project_relative(Path(t)) for t in scan_result.not_scanned]},
             indent=2,
         ),
         "```",

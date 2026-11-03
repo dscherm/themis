@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import re
 
+from .lang import source_extensions
+
 
 # Levels that DECLARE a module. Level 1 is included because a single-module
 # document titles itself `# src.foo`; level 3+ is a sub-section of the
@@ -55,8 +57,16 @@ DECLARING_LEVELS = (1, 2)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 # A heading may open with the module name in backticks; take that token.
 _LEADING_BACKTICK_RE = re.compile(r"^`([^`]+)`")
-# `path/to/mod.py` — a file path ending in .py.
-_PATH_TOKEN_RE = re.compile(r"^[\w./\-]+\.py$")
+# `path/to/mod.py`, `addons/x/panel.gd` — a file path ending in a source
+# extension of any language `lang` knows. This used to be `.py` only, so
+# every GDScript module heading read as undocumented
+# (godot-prompt-bridge/docs/themis-gd-heading-bug.md).
+_PATH_TOKEN_RE = re.compile(
+    r"^[\w./\-]+(?:"
+    + "|".join(re.escape(e) for e in sorted(source_extensions()))
+    + r")$",
+    re.IGNORECASE,
+)
 # `server.unit_store`, `core.schemas.Unit.summary` — two or more dot-joined
 # identifiers. One bare identifier ("Notes") is not a module name, which is
 # what keeps an ordinary prose heading out.
@@ -67,7 +77,11 @@ def normalise_module_key(name: str) -> str:
     """Canonicalize a module spelling — dotted (``server.unit_store``) or
     path (``server/unit_store.py``) — to one dotted, extension-free key, so
     a heading and a `public_surface.module` written in either spelling
-    resolve to the same thing."""
+    resolve to the same thing.
+
+    Only `.py` is stripped. Python is the one language where a path and a
+    dotted name spell the same module; a `.gd` path keeps its extension, so
+    `addons/x/panel.gd` and `addons/x/panel.py` stay different modules."""
     n = name.strip().replace("\\", "/")
     if n.endswith(".py"):
         n = n[:-3]
@@ -137,4 +151,10 @@ def declares_module(text: str, module: str) -> bool:
     if "." not in want:
         return False
     prefix = want + "."
-    return any(d.startswith(prefix) for d in declared)
+    # `addons.x.panel.gd` is the GDScript file, not a part of a module named
+    # `addons.x.panel`: a tail that is only a source extension is not a part.
+    ext_tails = {e.lstrip(".") for e in source_extensions()}
+    return any(
+        d.startswith(prefix) and d[len(prefix):].lower() not in ext_tails
+        for d in declared
+    )

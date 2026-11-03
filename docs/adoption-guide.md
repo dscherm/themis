@@ -381,6 +381,18 @@ Call `run_blind_tdd_gate(config)` from your script (Step 4). With `spawner: "man
    carries the command and exit code it was built from, and the green phase
    refuses a report that claims `pass` while its own evidence says otherwise.
 
+   For a Godot project, pass `runner="gut"`. It runs the config's
+   `stack.test_runner.gdscript.command` (or `command=`) on the `test_*.gd`
+   files and builds the report from GUT's own JUnit XML. A test defined on
+   disk that GUT never reported (its script failed to load) is recorded as
+   failed:
+
+   ```python
+   record_runner_handshake("<task_id>", test_dirs=["tests/contracts/"], runner="gut")
+   ```
+
+   See `docs/gdscript-pipeline.md` for what else reads GDScript.
+
 ### Every role has one of these
 
 The three roles the orchestrator dispatches each finish by leaving one

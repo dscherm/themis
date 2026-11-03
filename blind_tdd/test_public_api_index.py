@@ -233,3 +233,44 @@ def test_a_one_segment_module_key_does_not_swallow_every_dotted_heading():
     text = "# Public API\n\n" + H_COACHING + "\n"
     assert declares_module(text, "server.api") is True
     assert declares_module(text, "server") is False
+
+
+# --- GDScript module headings (godot-prompt-bridge/docs/themis-gd-heading-bug.md)
+
+# godot-prompt-bridge public_api.md, verbatim
+H_GD_PANEL = "## `addons/prompt_bridge/ui/prompt_panel.gd` (extends VBoxContainer)"
+GD_PANEL = "addons/prompt_bridge/ui/prompt_panel.gd"
+
+
+def test_a_gdscript_heading_with_a_trailing_title_names_its_module():
+    assert heading_module_token(H_GD_PANEL) == (2, GD_PANEL)
+    assert declares_module(H_GD_PANEL + "\n", GD_PANEL)
+
+
+def test_a_bare_gdscript_path_heading_names_its_module():
+    assert declares_module("## addons/x/panel.gd\n", "addons/x/panel.gd")
+
+
+def test_gdscript_preflight_no_longer_warns_on_a_documented_module():
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(td):
+            _write("# Public API\n\n" + H_GD_PANEL + "\n\n- `send()`\n")
+            assert _check_public_api_file(_task(GD_PANEL), _config()) == []
+
+
+def test_gdscript_preflight_still_warns_on_a_prose_mention_only():
+    """Control: the `.gd` widening must not make a prose mention count."""
+    with tempfile.TemporaryDirectory() as td:
+        with _chdir(td):
+            _write("# Public API\n\nThe panel lives in `" + GD_PANEL + "`.\n")
+            errors = _check_public_api_file(_task(GD_PANEL), _config())
+            assert len(errors) == 1 and "does not mention" in errors[0]
+
+
+def test_a_gd_heading_does_not_declare_the_same_named_py_module():
+    """Only `.py` has a dotted spelling; a `.gd` and a `.py` module with the
+    same stem are different modules."""
+    assert normalise_module_key("addons/x/panel.gd") != normalise_module_key("addons/x/panel.py")
+    assert not declares_module("## `addons/x/panel.gd`\n", "addons/x/panel.py")
+    assert not declares_module("## `addons/x/panel.py`\n", "addons/x/panel.gd")
+

@@ -109,7 +109,14 @@ from .security_pack import (
     pack_fingerprint,
     resolve_pack_path,
 )
-from .suppression import diff_suppressions, scan_repo, summarize_findings
+from .lang import collector_globs, language_for
+from .suppression import (
+    LEGACY_SOURCE_SUFFIXES,
+    diff_suppressions,
+    scan_repo,
+    scanned_suffixes,
+    summarize_findings,
+)
 from .orchestrator import (
     BlindTddOrchestrator,
     GreenPhaseResult,
@@ -405,6 +412,9 @@ def _seal_key() -> bytes | None:
 _SEAL_EXTRA_KEYS = (
     "suppression_baseline", "security_pack", "sealed_roots",
     "pending_rulings", "rulings_applied",
+    # Which file types the suppression baseline covered. Signed, so an
+    # implementer cannot shrink the green rescan by deleting it.
+    "suppression_suffixes",
 )
 
 
@@ -462,6 +472,7 @@ def save_red_state(
     *,
     suppression_baseline: dict | None = None,
     security_pack: dict | None = None,
+    suppression_suffixes: list[str] | None = None,
 ) -> None:
     p = _red_state_path(task_id)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -474,6 +485,8 @@ def save_red_state(
     }
     if suppression_baseline is not None:
         state["suppression_baseline"] = suppression_baseline
+        if suppression_suffixes is not None:
+            state["suppression_suffixes"] = list(suppression_suffixes)
     if security_pack is not None:
         state["security_pack"] = security_pack
     # getattr, not result.sealed_roots: some callers (tests, older code) pass
@@ -1184,6 +1197,9 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
             task_id, red,
             suppression_baseline=suppression_baseline,
             security_pack=pack_record,
+            suppression_suffixes=(
+                scanned_suffixes() if suppression_baseline is not None else None
+            ),
         )
 
         return BlindGateResult(
@@ -1413,7 +1429,13 @@ def _run_blind_tdd_gate(config: dict, preflight_sink: list[str]) -> BlindGateRes
     suppression_warning = ""
     baseline = red_state.get("suppression_baseline")
     if btd_cfg["suppression_audit"] and isinstance(baseline, dict):
-        findings = diff_suppressions(baseline, scan_repo())
+        # Rescan exactly the file types the baseline covered. A red state
+        # sealed before it recorded them was baselined with the legacy set.
+        recorded = red_state.get("suppression_suffixes")
+        suffixes = (
+            frozenset(recorded) if isinstance(recorded, list) else LEGACY_SOURCE_SUFFIXES
+        )
+        findings = diff_suppressions(baseline, scan_repo(suffixes=suffixes))
         if findings:
             summary = summarize_findings(findings)
             record_tamper(task, KIND_SUPPRESSION_INTRODUCED, summary)
@@ -1500,18 +1522,35 @@ def _task_own_test_files(task_id: str, test_dirs: list[str]) -> list[Path]:
                         named.append(e[fk])
 
     found: dict[str, Path] = {}
+    # Any source file the reports name is kept, whatever its language: one
+    # with no quality scanner is then reported as not scanned rather than
+    # dropped here (it used to be: `.py` only).
     for n in named:
         p = Path(n)
-        if p.suffix == ".py" and p.is_file() and not is_artifact_path(p):
+        if language_for(p) is not None and p.is_file() and not is_artifact_path(p):
             found.setdefault(p.resolve().as_posix(), p)
     for td in test_dirs:
         d = Path(td)
         if not d.is_dir():
             continue
-        for p in d.rglob("test_*.py"):
-            if p.is_file() and not is_artifact_path(p) and _bead_of(str(p)) == task_id:
-                found.setdefault(p.resolve().as_posix(), p)
+        for glob in collector_globs():
+            for p in d.rglob(glob):
+                if p.is_file() and not is_artifact_path(p) and _bead_of(str(p)) == task_id:
+                    found.setdefault(p.resolve().as_posix(), p)
     return list(found.values())
+
+
+def _all_test_files(test_dirs: list[str]) -> list[Path]:
+    """Every `test_*` source file under `test_dirs`, any known language."""
+    out: list[Path] = []
+    for td in test_dirs:
+        d = Path(td)
+        if d.is_dir():
+            out.extend(
+                p for p in sorted(d.rglob("test_*"))
+                if p.is_file() and language_for(p) is not None and not is_artifact_path(p)
+            )
+    return out
 
 
 def _run_quality_review_phase(
@@ -1539,13 +1578,7 @@ def _run_quality_review_phase(
     test_files = _task_own_test_files(task_id, test_dirs)
     fell_back = not test_files
     if fell_back:
-        for td in test_dirs:
-            d = Path(td)
-            if d.is_dir():
-                test_files.extend(
-                    p for p in d.rglob("test_*.py")
-                    if p.is_file() and not is_artifact_path(p)
-                )
+        test_files.extend(_all_test_files(test_dirs))
     public_module = (task.get("public_surface") or {}).get("module")
     src_files: list[Path] = []
     if public_module:
@@ -1584,7 +1617,10 @@ def _run_quality_review_phase(
         phase="quality_review_pending",
         message=(
             f"quality review staged for task {task_id!r}: "
-            f"{len(scan_result.candidates)} candidate(s) at {brief_path}. "
+            f"{len(scan_result.candidates)} candidate(s)"
+            + (f", {len(scan_result.not_scanned)} test file(s) NOT SCANNED (no scanner for "
+               f"their language)" if scan_result.not_scanned else "")
+            + f" at {brief_path}. "
             f"Run the reviewer (conduct interview via AskUserQuestion) and "
             f"write the final verdict to {qr.final_review_path(task_id)}."
         ),
@@ -1592,6 +1628,7 @@ def _run_quality_review_phase(
         details={
             "candidate_count": len(scan_result.candidates),
             "candidate_kinds": sorted({c.kind for c in scan_result.candidates}),
+            "not_scanned": list(scan_result.not_scanned),
             "brief_path": str(brief_path),
             "final_path": str(qr.final_review_path(task_id)),
         },

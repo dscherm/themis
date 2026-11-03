@@ -388,20 +388,11 @@ def _task_id_pattern(task_id: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![0-9a-z]){body}(?![0-9a-z])")
 
 
-_BEAD_LINE = re.compile(r"^[ 	]*Bead:[ 	]*([A-Za-z0-9][A-Za-z0-9._-]*)", re.MULTILINE)
-
-
 def _bead_of(path: str) -> str | None:
-    """The id on a `Bead: <id>` line of a Python file's module docstring."""
-    if not str(path).lower().endswith(".py"):
-        return None
-    try:
-        import ast
-        doc = ast.get_docstring(ast.parse(Path(path).read_text(encoding="utf-8")))
-    except (SyntaxError, ValueError, OSError):
-        return None
-    m = _BEAD_LINE.search(doc or "")
-    return m.group(1) if m else None
+    """The id on a test file's `Bead: <id>` line: a Python module docstring,
+    or a GDScript header comment. See `lang.bead_of`."""
+    from .lang import bead_of
+    return bead_of(path)
 
 
 @dataclass
@@ -823,8 +814,15 @@ def record_runner_handshake(
     pytest_args: list | tuple = (),
     timeout: int = 3600,
     green_report_dir: Path | None = None,
+    runner: str = "pytest",
+    command: str | None = None,
 ) -> Path:
     """Run the tests and record the outcome — the green-phase handshake.
+
+    `runner="gut"` runs a GDScript suite instead: `command` (default: the
+    config's `stack.test_runner.gdscript.command`) on the `test_*.gd` files
+    in `targets` / `test_dirs`, measured from GUT's own JUnit XML. See
+    `gut_runner.measure_gut_run`.
 
     The supported completion path for an implementing agent that made a blind
     contract green outside the orchestrator. Until it existed, such an agent
@@ -859,9 +857,15 @@ def record_runner_handshake(
             "`test_dirs` that exist relative to the project root"
         )
 
-    report = measure_test_run(
-        chosen, cwd=cwd, pytest_args=pytest_args, timeout=timeout
-    )
+    if runner == "gut":
+        from .gut_runner import measure_gut_run
+        report = measure_gut_run(chosen, command=command, cwd=cwd, timeout=timeout)
+    elif runner == "pytest":
+        report = measure_test_run(
+            chosen, cwd=cwd, pytest_args=pytest_args, timeout=timeout
+        )
+    else:
+        raise ValueError(f"unknown runner {runner!r}: expected 'pytest' or 'gut'")
     report["task"] = task_id
     return record_handshake(
         "test_runner", task_id, report, directory=green_report_dir

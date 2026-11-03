@@ -32,6 +32,7 @@ import re
 from pathlib import Path
 
 from .artifacts import is_artifact_path
+from .lang import extra_suppression_patterns, source_extensions
 
 
 # Marker name → pattern. Case-insensitive. Names are stable identifiers that
@@ -50,6 +51,8 @@ SUPPRESSION_PATTERNS: dict[str, str] = {
     "nolint": r"//\s*nolint\b",                         # golangci-lint / clang-tidy
     "nosemgrep": r"\bnosemgrep\b",                      # semgrep
     "rubocop-disable": r"rubocop\s*:\s*disable\b",      # rubocop
+    # Per-language markers (e.g. GDScript's @warning_ignore) live in `lang`.
+    **extra_suppression_patterns(),
 }
 
 _COMPILED = {
@@ -57,12 +60,24 @@ _COMPILED = {
     for name, pattern in SUPPRESSION_PATTERNS.items()
 }
 
-# Only files that plausibly hold source code are scanned.
-SOURCE_SUFFIXES = frozenset({
+# The suffixes scanned before `.gd` was added. A red state that does not
+# record which suffixes its baseline covered was baselined with exactly
+# these, so its green rescan must use them too: otherwise every marker
+# already sitting in a newly scanned file type would read as introduced
+# during the implementation window, and land in the tamper ledger.
+LEGACY_SOURCE_SUFFIXES = frozenset({
     ".py", ".js", ".jsx", ".ts", ".tsx", ".cs", ".java", ".go", ".rb",
     ".kt", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp", ".php", ".swift",
     ".scala", ".m", ".mm",
 })
+
+# Only files that plausibly hold source code are scanned.
+SOURCE_SUFFIXES = LEGACY_SOURCE_SUFFIXES | source_extensions()
+
+
+def scanned_suffixes() -> list[str]:
+    """The suffixes a new baseline covers, sorted, for the red state."""
+    return sorted(SOURCE_SUFFIXES)
 
 # Directories pruned from the walk, on top of artifacts.is_artifact_path and
 # the blanket dot-prefix rule (.git, .themis, .venv, ...).
@@ -91,8 +106,13 @@ def _should_skip_dir(name: str) -> bool:
     return name.startswith(".") or name.lower() in _SKIP_DIRS
 
 
-def scan_repo(root: Path | str = ".") -> dict[str, dict[str, int]]:
+def scan_repo(
+    root: Path | str = ".", suffixes: frozenset[str] | set[str] | list[str] | None = None,
+) -> dict[str, dict[str, int]]:
     """Suppression-marker counts for every source file under `root`.
+
+    `suffixes` limits the walk to those file types (default: all of
+    SOURCE_SUFFIXES). The green rescan passes the set its baseline covered.
 
     Returns {relative_path (forward slashes): {marker_name: count}} — only
     files with at least one marker appear, so a clean repo yields {}.
@@ -100,13 +120,14 @@ def scan_repo(root: Path | str = ".") -> dict[str, dict[str, int]]:
     must never raise.
     """
     root = Path(root)
+    wanted = frozenset(s.lower() for s in suffixes) if suffixes is not None else SOURCE_SUFFIXES
     results: dict[str, dict[str, int]] = {}
     seen = 0
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if not _should_skip_dir(d))
         for fname in sorted(filenames):
             path = Path(dirpath) / fname
-            if path.suffix.lower() not in SOURCE_SUFFIXES:
+            if path.suffix.lower() not in wanted:
                 continue
             if is_artifact_path(path):
                 continue
