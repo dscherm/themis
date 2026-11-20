@@ -291,3 +291,63 @@ def test_tag_for_a_criterion_this_task_lacks_is_out_of_scope():
         f.write_text('def test_x():\n    """Covers: AC-9"""\n', encoding="utf-8")
         why = _new_file_scope(str(f), task=VALID_TASK, known_task_ids=[])
         assert why.startswith("out of scope"), why
+
+
+# ---------------------------------------------------------------------------
+# A sealed file outside the configured test dirs (ruling re-seal)
+# ---------------------------------------------------------------------------
+
+OUTSIDE = Path("tests") / "audit" / "test_outside.py"
+OUTSIDE_SRC = "def test_outside():\n    assert True\n"
+
+
+def _red_with_outside_file(orch):
+    red = orch.run_red_phase(VALID_TASK)
+    assert red.passed
+    OUTSIDE.parent.mkdir(parents=True, exist_ok=True)
+    OUTSIDE.write_text(OUTSIDE_SRC, encoding="utf-8")
+    red.test_file_hashes[str(OUTSIDE)] = gi_hash(OUTSIDE)
+    return red
+
+
+def gi_hash(path: Path) -> str:
+    from blind_tdd.orchestrator import _hash_file
+    return _hash_file(path)
+
+
+def test_sealed_file_outside_test_dirs_unchanged_is_not_deleted():
+    with tempfile.TemporaryDirectory() as td:
+        project, ralph = _red(Path(td))
+        with _chdir(project):
+            orch = _make_orch(ralph)
+            red = _red_with_outside_file(orch)
+
+            green = orch.run_green_phase(VALID_TASK, red)
+            assert green.passed, green.reason
+            assert green.hash_match and not green.hash_break
+
+
+def test_sealed_file_outside_test_dirs_modified_is_reported_modified():
+    with tempfile.TemporaryDirectory() as td:
+        project, ralph = _red(Path(td))
+        with _chdir(project):
+            orch = _make_orch(ralph)
+            red = _red_with_outside_file(orch)
+            OUTSIDE.write_text(OUTSIDE_SRC + "# weakened\n", encoding="utf-8")
+
+            green = orch.run_green_phase(VALID_TASK, red)
+            assert not green.passed and green.hash_break
+            assert "test_outside.py (modified)" in green.reason
+
+
+def test_sealed_file_outside_test_dirs_deleted_is_reported_deleted():
+    with tempfile.TemporaryDirectory() as td:
+        project, ralph = _red(Path(td))
+        with _chdir(project):
+            orch = _make_orch(ralph)
+            red = _red_with_outside_file(orch)
+            OUTSIDE.unlink()
+
+            green = orch.run_green_phase(VALID_TASK, red)
+            assert not green.passed and green.hash_break
+            assert "test_outside.py (deleted)" in green.reason

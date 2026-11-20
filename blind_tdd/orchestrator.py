@@ -1597,6 +1597,11 @@ class BlindTddOrchestrator:
         # task's (docs/shared-checkout-seal.md) -- in a checkout several
         # sessions merge into, other tasks' tests land mid-window.
         current_hashes = _hash_test_files([Path(d) for d in self.test_dirs])
+        # A ruling re-seal can add a sealed file outside the configured test
+        # dirs; it must be judged on its bytes, not reported deleted.
+        for sealed in red_result.test_file_hashes:
+            if sealed not in current_hashes and Path(sealed).is_file():
+                current_hashes[sealed] = _hash_file(Path(sealed))
         seal_diff = _classify_seal_diff(
             red_result.test_file_hashes, current_hashes,
             task=task, known_task_ids=self.known_task_ids,
