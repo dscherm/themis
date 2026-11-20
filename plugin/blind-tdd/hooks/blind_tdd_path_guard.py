@@ -348,6 +348,43 @@ def _normalize_path(raw: str) -> str:
     return str(PurePosixPath(*rel.parts))
 
 
+_CASE_ENV = "BLIND_TDD_PATH_CASE"
+_DETECTED_INSENSITIVE: bool | None = None
+
+
+def _detect_case_insensitive() -> bool:
+    """True when the project root is reachable under a different letter case."""
+    global _DETECTED_INSENSITIVE
+    if _DETECTED_INSENSITIVE is not None:
+        return _DETECTED_INSENSITIVE
+    result = os.path.normcase("A") == "a"
+    try:
+        root = str(_repo_root())
+        swapped = root.swapcase()
+        if swapped != root:
+            result = bool(os.path.exists(swapped)
+                          and os.path.samefile(swapped, root))
+        elif not result:
+            result = False
+    except (OSError, ValueError):
+        pass
+    _DETECTED_INSENSITIVE = result
+    return result
+
+
+def _fold_case() -> bool:
+    mode = os.environ.get(_CASE_ENV, "").strip().lower()
+    if mode == "sensitive":
+        return False
+    if mode == "insensitive":
+        return True
+    return _detect_case_insensitive()
+
+
+def _fold(text: str) -> str:
+    return text.lower() if _fold_case() else text
+
+
 def _pattern_matches(path: str, pattern: str) -> bool:
     """Check if `path` matches `pattern` using gitignore-ish semantics.
 
@@ -359,6 +396,9 @@ def _pattern_matches(path: str, pattern: str) -> bool:
     """
     if not pattern or not path:
         return False
+
+    path = _fold(path)
+    pattern = _fold(pattern)
 
     # Exact match
     if path == pattern:
@@ -566,7 +606,7 @@ def _locked_test_files() -> set[str]:
             # on Windows). Normalize to POSIX so they match the forward-slash
             # form produced by _normalize_path for incoming tool-call paths —
             # otherwise the deny-wins rule silently no-ops on Windows.
-            locked.add(str(PurePosixPath(str(rel).replace("\\", "/"))))
+            locked.add(_fold(str(PurePosixPath(str(rel).replace("\\", "/")))))
     return locked
 
 
@@ -744,7 +784,7 @@ def _decide(tool_name: str, tool_input: dict, session: dict) -> int:
     # tamper_attempts.jsonl, which pre_commit_gate folds into the observation
     # stream — so a self-disarm is loud, not silent. An unrecoverable session
     # is the worse failure, because its cure is to stop arming sessions at all.
-    if path_norm == _SESSION_RELPATH:
+    if _fold(path_norm) == _fold(_SESSION_RELPATH):
         _write_audit_attempt(
             session, tool_name, path_norm, True,
             "blind-TDD session file is always reachable so the session can be ended",
@@ -789,7 +829,7 @@ def _decide(tool_name: str, tool_input: dict, session: dict) -> int:
     if (allowed and tool_name in _WRITE_TOOLS
             and session.get("agent_role") != "test_writer"):
         locked = _locked_test_files()
-        if path_norm in locked:
+        if _fold(path_norm) in locked:
             allowed = False
             reason = "write to hash-locked test file (red_state)"
 
@@ -802,14 +842,15 @@ def _decide(tool_name: str, tool_input: dict, session: dict) -> int:
     # for the observation stream (folded in by pre_commit_gate at commit).
     if locked is None:
         locked = _locked_test_files()
-    if path_norm in locked:
+    if _fold(path_norm) in locked:
         _write_tamper_attempt(session, tool_name, path_norm, reason)
 
     # Block the tool call
     session_id = session.get("session_id", "?")
     agent_role = session.get("agent_role", "?")
+    shown = path_norm if len(path_norm) <= 200 else path_norm[:200] + "..."
     msg = (
-        f"[blind-tdd] BLOCKED: {tool_name} access to {path_norm!r} "
+        f"[blind-tdd] BLOCKED: {tool_name} access to {shown!r} "
         f"denied by blind-TDD policy ({reason}). "
         f"Session: {session_id}, role: {agent_role}. "
         f"Blind agents must not read implementation code; rely only on the "
